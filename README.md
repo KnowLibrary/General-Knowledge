@@ -1,6 +1,6 @@
 # General-Knowledge
 
-## Why Silver Price is increasing
+## Why US Federal Reserve Interest Rate Cut impacts Gold and Silver prices?
 The anticipated impact of a U.S. Federal Reserve (Fed) interest rate cut is generally favourable for gold and silver prices in terms of USD value.
 
 1. Reduced Opportunity Cost
