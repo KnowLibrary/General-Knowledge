@@ -1,0 +1,2709 @@
+This is a classic "dashboard-with-saved-views" architectural pattern. When building this without heavy state machines like Redux or TanStack Query, the key is to leverage React Context for localized feature state combined with controlled/uncontrolled state boundaries to prevent the entire page from re-rendering when a user interacts with a single dropdown.
+Here is your architectural blueprint for a highly performant, reusable, and UX-optimized solution.
+________________________________________
+1. UI/UX Structure & Flow Recommendations
+To ensure a seamless user experience, we need to solve a few common friction points with view management:
+•	The "Dirty State" Indicator: When a user modifies filters or column orders on an existing view, change the view dropdown label to * View Name (Modified). This gives immediate visual feedback.
+•	The Action Bar Placement: Place the Save and Revert buttons immediately next to the View Dropdown in Row 1, or anchored to the top-right of the entire filter bar. Keeping them contextual to the "View" concept prevents layout shifting.
+•	Footer Navigation: In the view dropdown, style the footer sticky rows distinctly (e.g., a subtle top border, slightly different background) so they don’t blend into the selectable list.
+•	The "Apply" vs. "Instant" Filter Dilemma: Because you have an explicit Apply button, the filter dropdowns should hold local transient state and only commit to the global page state when "Apply" is clicked. This prevents the table from refetching/re-rendering on every single checkbox click.
+________________________________________
+2. Component Breakdown (Maximizing Reusability)
+To ensure these components can be shared across the app, we decouple the layout from the data fetching.
+Row 1: View Management
+•	<ViewSelector />: The main dropdown component.
+o	<DropdownMenu /> (Generic): Reusable dropdown wrapper.
+o	<ViewOptionItem />: Individual view list items.
+o	<DropdownFooterLink />: Reusable component for the "Create" and "Manage" action rows.
+•	<ViewActions />: Renders the Save Changes and Revert buttons conditionally based on isDirty state.
+Row 2: Filter Controls
+•	<FilterBar />: Flex/Grid wrapper that handles responsiveness.
+o	<FilterDropdown /> (Generic): A reusable multi-select/single-select popover. Must maintain internal open/close and temporary checked states.
+o	<Button /> (Generic): Primary for Apply, Secondary/Text for Reset.
+Row 3: Data Presentation
+•	<DataTable />: A wrapper around material-react-table. It accepts columns, data, visibility state, and order state as props, keeping it entirely presentational.
+________________________________________
+3. State Management Strategy
+Without Redux or TanStack Query, the best approach is a localized React Context Pattern acting as a mini-state machine for this specific page/dashboard feature.
+State Categorization
+We split state into Committed State (what the table and view engine care about) and Transient State (what the user is playing with before hitting "Apply").
+State Piece	Type	Location	Purpose
+savedViews	Array	Context	List of all user views fetched from API.
+activeViewId	String/ID	Context	The currently active view configuration.
+committedFilters	Object	Context	Filters currently applied to the data query.
+transientFilters	Object	Local <FilterBar />	Unsaved filter selections (pre-Apply).
+columnVisibility	Object	Context	Controlled MRT visibility state.
+columnOrder	Array	Context	Controlled MRT column order state.
+isLoading	Boolean	Context	Global table skeleton/spinner state.
+The "Is Dirty" Matrix
+To show Save and Revert, use a derived state selector inside your Context provider:
+JavaScript
+const isDirty = 
+  JSON.stringify(committedFilters) !== JSON.stringify(activeView?.filters) ||
+  JSON.stringify(columnVisibility) !== JSON.stringify(activeView?.visibility) ||
+  JSON.stringify(columnOrder) !== JSON.stringify(activeView?.order);
+________________________________________
+4. Performance Optimization (Avoiding Re-renders)
+material-react-table can be heavy if the parent component re-renders blindly. Here is how you keep interactions at 60fps:
+A. Isolate Transient State
+Do not update the global Page Context every time a user checks a box in a filter dropdown.
+•	Keep the selections in the <FilterBar /> local state or individual <FilterDropdown /> states.
+•	Only lift it up to the Context (as committedFilters) when the Apply button is clicked.
+B. Memoize Table Props
+material-react-table relies heavily on object references. If you pass raw objects, it will re-render infinitely.
+TypeScript
+// Inside your Table Component container
+const memoizedColumns = useMemo(() => columns, [columns]);
+const memoizedData = useMemo(() => data, [data]);
+
+// Use useCallback for MRT state change handlers
+const handleColumnVisibilityChange = useCallback((updater) => {
+  setColumnVisibility(updater);
+}, []);
+C. Context Splitting (Optional but Highly Recommended)
+If clicking a filter dropdown causes the table rows to lag, split your Context into a StateContext and a DispatchContext. This ensures components that just trigger actions (like buttons) don't re-render when the state values change.
+________________________________________
+5. Ideal Folder & Component Architecture
+Here is a clean, scalable feature-folder layout (features/monitored-dashboard) that encapsulates the logic while exposing reusable atoms to the shared library later.
+Plaintext
+src/
+├── components/                  # Global Reusable UI Atoms (Design System)
+│   ├── Button/
+│   ├── Dropdown/
+│   └── Table/                   # Base MRT wrapper if used globally
+│
+├── features/                    # Feature-driven modules
+│   └── ViewManagementDashboard/
+│       ├── components/          # Feature-specific sub-components
+│       │   ├── FilterBar.tsx
+│       │   ├── ViewActions.tsx
+│       │   ├── ViewSelector.tsx
+│       │   └── ViewManagerModal.tsx
+│       │
+│       ├── context/
+│       │   └── DashboardStateContext.tsx  # The "Brain" of the page
+│       │
+│       ├── hooks/
+│       │   ├── useFetchDashboardData.ts   # Abstraction for native fetch/axios
+│       │   └── useViewDerivedState.ts     # Calculates isDirty, view diffs
+│       │
+│       └── DashboardPage.tsx    # Entry point layout row 1, 2, 3
+How the Entry Point Looks:
+TypeScript
+// DashboardPage.tsx
+import { DashboardProvider } from './context/DashboardStateContext';
+
+export default function DashboardPage() {
+  return (
+    <DashboardProvider>
+      <div className="flex flex-col gap-4 p-6">
+        {/* Row 1: View Selection & Actions */}
+        <div className="flex justify-between items-center">
+          <ViewSelector />
+          <ViewActions />
+        </div>
+
+        {/* Row 2: Filters */}
+        <FilterBar />
+
+        {/* Row 3: Performance isolated Table */}
+        <DashboardTableContainer />
+      </div>
+    </DashboardProvider>
+  );
+}
+
+
+Here is how our localized state machine (the DashboardProvider context) gracefully coordinates these events.
+By separating Transient State (uncommitted UI changes) from Committed State (what the table and API actually read), we keep performance snappy and prevent unnecessary re-renders.
+________________________________________
+1. User changes the view selected
+•	The Flow: The user selects a different saved view from the <ViewSelector /> dropdown.
+•	State Handling: 1. The activeViewId is updated to the new view's ID. 2. The Context state clears out any current filter changes and overwrites committedFilters, columnVisibility, and columnOrder with the raw, saved configuration objects of the newly selected view. 3. The local transientFilters in the <FilterBar /> are synchronized to match this new view. 4. The isDirty flag automatically recalculates to false (since the current state now exactly matches the newly active view). 5. The table's loading state (isLoading) is set to true while the new dataset fetches based on these fresh filters.
+2. Manage View popup: the user deletes the view already selected
+•	The Flow: The user opens the management modal and deletes the view they are currently actively looking at.
+•	State Handling:
+1.	Upon API deletion success, the view is removed from the global savedViews array in the context.
+2.	The context detects that the deleted view ID matches the activeViewId.
+3.	The activeViewId resets to a fallback state (either a system default view, an "All Data" empty view, or null).
+4.	The table resets its columns and filters back to the factory defaults associated with that fallback view.
+3. New filters are applied, and the user clicks on the "Apply" button
+•	The Flow: The user checks some boxes inside a <FilterDropdown /> and hits Apply.
+•	State Handling:
+1.	While interacting inside the dropdown, only the local transientFilters state changes. The table does not re-render or refetch.
+2.	When Apply is clicked, the transientFilters value is copied over into the context's committedFilters.
+3.	The isDirty derived state evaluates to true because committedFilters no longer matches the filters object stored inside the activeView.
+4.	The Save Changes and Revert buttons instantly appear.
+5.	The data fetching hook detects the change in committedFilters and triggers the API request to update the table data.
+4. Click on the "Save Changes" button
+•	The Flow: The user likes their modified configuration and wants to overwrite the current saved view.
+•	State Handling:
+1.	A payload containing { id: activeViewId, filters: committedFilters, visibility: columnVisibility, order: columnOrder } is sent to your backend API via a PUT/POST request.
+2.	Upon a successful 200 OK response, the context updates that specific view's object inside the savedViews array.
+3.	The isDirty flag instantly recalculates to false because the current table/filter layout now perfectly mirrors the newly updated database record.
+4.	The Save Changes and Revert buttons safely transition out of sight.
+5. Click on the "Revert" button
+•	The Flow: The user wants to abandon all their modifications and return to the view's original state.
+•	State Handling:
+1.	The context looks up the pristine configuration of the current activeViewId within the savedViews array.
+2.	It forces committedFilters, columnVisibility, and columnOrder back to those exact saved values.
+3.	It syncs the <FilterBar />'s transientFilters back to match.
+4.	The isDirty flag drops back to false, the action buttons vanish, and the table automatically re-fetches the original data parameters.
+6 & 7. Table column order or visibility is changed
+•	The Flow: The user drags a column header to reorder it or toggles a checkbox in the material-react-table column menu.
+•	State Handling:
+1.	Material-react-table fires its internal state change handlers, which we intercept using callbacks (handleColumnVisibilityChange and handleColumnOrderChange).
+2.	These callbacks update columnVisibility and columnOrder directly in our page context.
+3.	Because these properties live in the context, the derived isDirty engine compares them against the database-saved view layout. They no longer match, so isDirty becomes true, exposing the Save/Revert actions.
+4.	Performance note: Because MRT handles its own rendering layout beautifully, updating these layout states will smoothly update the table grid without triggering a backend data refetch.
+8. User selects a new filter in the dropdown, then unselects it
+•	The Flow: A user opens a dropdown, checks an item, decides against it, and unchecks it before hitting apply.
+•	State Handling:
+1.	This entire sequence happens purely within the <FilterBar /> component's transientFilters state.
+2.	Because the user never clicked Apply, the page-level context remains completely untouched.
+3.	The isDirty flag stays false, the table never goes into a loading state, and the data stays exactly as it was.
+9. User changes column order/visibility, then manually changes them back
+•	The Flow: The user drags Column A to the right, then drags it right back to its starting position (or opens visibility, hides a column, and unhides it).
+•	State Handling:
+1.	As the user drags or toggles, the context states (columnOrder / columnVisibility) change dynamically.
+2.	Every time they change, our reference check runs: JSON.stringify(columnOrder) === JSON.stringify(activeView.order)
+3.	The exact moment the user puts the columns back into their original configurations, the deep-equality check passes.
+4.	The isDirty flag seamlessly flips back to false, and the Save/Revert buttons cleanly disappear on their own without the user needing to click anything.
+
+To make the ViewSelector highly reusable across different pages—each with entirely unique filters, data attributes, and table column setups—we must follow a core design principle: The component should be a "dumb" visual shell that accepts its layout, configuration, and state as props or via a generic context.
+The component itself should not care what the filters are; it only cares that it has an array of views to display, a way to tell the parent which view is active, and a slot to render the page-specific modals.
+Here is the architectural pattern to make this component universally shareable across your app.
+________________________________________
+1. The Generic View Schema
+To ensure the ViewSelector can handle any page, we establish a standardized TypeScript contract (or JSON structure) for what a "View" is. By using a generic type parameter (TFilters), the component remains agnostic to the specific structure of a page's filters.
+TypeScript
+// types/view.ts
+export interface SavedView<TFilters = Record<string, any>> {
+  id: string;
+  name: string;
+  isSystemDefault?: boolean;
+  
+  // Dynamic page-specific configurations
+  filters: TFilters;
+  columnVisibility: Record<string, boolean>;
+  columnOrder: string[];
+}
+________________________________________
+2. Decoupling Configuration via Composition (The "Slot" Pattern)
+Because the "Create View" and "Manage View" popups will look vastly different depending on the page (e.g., the Create View modal on a Users page needs to let them name user-specific filters, while an Invoices page needs date-range filters), we avoid hardcoding modals inside the dropdown.
+Instead, we use React compound components or render props to pass the specific management modals down.
+The Reusable <ViewSelector /> Component
+TypeScript
+// components/shared/ViewSelector.tsx
+import { ReactNode } from 'react';
+import { SavedView } from '@/types/view';
+
+interface ViewSelectorProps<T> {
+  views: SavedView<T>[];
+  activeViewId: string | null;
+  isDirty: boolean;
+  onViewChange: (viewId: string) => void;
+  onSave: () => void;
+  onRevert: () => void;
+  
+  // Slots for Page-Specific Modals/Popups
+  createViewElement: ReactNode; 
+  manageViewsElement: ReactNode;
+}
+
+export function ViewSelector<T>({
+  views,
+  activeViewId,
+  isDirty,
+  onViewChange,
+  onSave,
+  onRevert,
+  createViewElement,
+  manageViewsElement,
+}: ViewSelectorProps<T>) {
+  const activeView = views.find((v) => v.id === activeViewId);
+  const dropdownLabel = activeView 
+    ? `${activeView.name}${isDirty ? ' *' : ''}` 
+    : 'Select View';
+
+  return (
+    <div className="flex items-center gap-3">
+      {/* Reusable UI Dropdown Shell */}
+      <Dropdown menuLabel={dropdownLabel}>
+        {/* Dynamic List of Views */}
+        <DropdownGroup>
+          {views.map((view) => (
+            <DropdownItem 
+              key={view.id} 
+              isActive={view.id === activeViewId}
+              onClick={() => onViewChange(view.id)}
+            >
+              {view.name}
+            </DropdownItem>
+          ))}
+        </DropdownGroup>
+        
+        <DropdownDivider />
+        
+        {/* Dropdown Footer - Slots are rendered here */}
+        <DropdownFooter>
+          {createViewElement}
+          {manageViewsElement}
+        </DropdownFooter>
+      </Dropdown>
+
+      {/* Conditional Action Buttons */}
+      {isDirty && (
+        <div className="flex gap-2 animation-fade-in">
+          <Button onClick={onSave} variant="primary" size="sm">Save Changes</Button>
+          <Button onClick={onRevert} variant="secondary" size="sm">Revert</Button>
+        </div>
+      )}
+    </div>
+  );
+}
+________________________________________
+3. How Different Pages Implement It
+Now, let's look at how two entirely different dashboards implement this exact same component.
+Example A: The User Management Page
+This page filters by role and status, and uses a specific modal to create user views.
+TypeScript
+// features/users/UserDashboard.tsx
+import { ViewSelector } from '@/components/shared/ViewSelector';
+import { useUserDashboardContext } from './context/UserDashboardContext';
+import { CreateUserViewModal } from './components/CreateUserViewModal';
+import { ManageUserViewsModal } from './components/ManageUserViewsModal';
+
+interface UserFilters {
+  role: string[];
+  status: 'active' | 'inactive' | 'all';
+}
+
+export function UserDashboard() {
+  const { 
+    views, activeViewId, isDirty, 
+    handleViewChange, saveCurrentView, revertChanges 
+  } = useUserDashboardContext(); // Page-specific context
+
+  return (
+    <div className="page-layout">
+      <ViewSelector<UserFilters>
+        views={views}
+        activeViewId={activeViewId}
+        isDirty={isDirty}
+        onViewChange={handleViewChange}
+        onSave={saveCurrentView}
+        onRevert={revertChanges}
+        
+        // Passing the User-specific modals into the slots
+        createViewElement={<CreateUserViewModal />}
+        manageViewsElement={<ManageUserViewsModal />}
+      />
+      
+      {/* User filters and User table go below */}
+    </div>
+  );
+}
+Example B: The Financial Transactions Page
+This page filters by dateRange and amountGreaterThan, completely independent of the Users page logic.
+TypeScript
+// features/finance/FinanceDashboard.tsx
+import { ViewSelector } from '@/components/shared/ViewSelector';
+import { useFinanceContext } from './context/FinanceContext';
+import { CreateFinanceViewModal } from './components/CreateFinanceViewModal';
+import { ManageFinanceViewsModal } from './components/ManageFinanceViewsModal';
+
+interface FinanceFilters {
+  dateRange: { start: string; end: string };
+  amountGreaterThan: number;
+}
+
+export function FinanceDashboard() {
+  const { 
+    views, activeViewId, isDirty, 
+    changeView, saveView, revertView 
+  } = useFinanceContext();
+
+  return (
+    <div className="page-layout">
+      <ViewSelector<FinanceFilters>
+        views={views}
+        activeViewId={activeViewId}
+        isDirty={isDirty}
+        onViewChange={changeView}
+        onSave={saveView}
+        onRevert={revertView}
+        
+        // Passing Finance-specific modals into the slots
+        createViewElement={<CreateFinanceViewModal />}
+        manageViewsElement={<ManageFinanceViewsModal />}
+      />
+      
+      {/* Finance filters and MRT table go below */}
+    </div>
+  );
+}
+________________________________________
+4. Key Takeaways for Multi-Page Scaling
+1.	State Isolation: The ViewSelector stays 100% presentation-driven. It doesn't know how to save a view or fetch views from an API. It just triggers callbacks (onSave, onViewChange) provided by whichever page hosts it.
+2.	Type Safety via Generics: By utilizing <ViewSelector<TFilters>>, your code editors will properly auto-complete and protect the shape of your configurations across different feature directories.
+3.	Flexible Modals: By leveraging React's children/slots pattern (createViewElement), the dropdown footer links simply trigger modals that live alongside their respective feature domains, avoiding any bloated conditional logic inside your shared UI components directory.
+That is an excellent observation. If the business requirements for creating and managing views are uniform across the app—meaning every page simply saves a name, an icon/color, or a description, while the dashboard context quietly injects the payload details behind the scenes—then we can turn <CreateViewModal /> and <ManageViewsModal /> into fully global, highly reusable components too.
+To pull this off, the global modals just need to be fed two things:
+1.	The current configuration payload (supplied by the active page's context).
+2.	An API configuration or callback handler to perform the save/delete network requests.
+Here is how you can centralize the entire system so that adding a "Saved Views" feature to a brand-new page takes less than 10 lines of code.
+________________________________________
+1. Unified API/State Strategy via Callbacks
+Since the global modals shouldn't be coupled to a specific page's API endpoints, we pass standard save and delete operation callbacks. This allows the modal to remain a presentation shell while the page's local layout controls the data execution.
+The Reusable <CreateViewModal />
+This modal only cares about capturing user inputs like the View Name. When the user clicks "Save", it hands that name back to the parent along with the payload.
+TypeScript
+// components/shared/views/CreateViewModal.tsx
+import { useState } from 'react';
+
+interface CreateViewModalProps {
+  isOpen: boolean;
+  onClose: () => void;
+  // Callback that passes the custom name back up to the page feature
+  onConfirmCreate: (viewName: string) => Promise<void>;
+}
+
+export function CreateViewModal({ isOpen, onClose, onConfirmCreate }: CreateViewModalProps) {
+  const [viewName, setViewName] = useState('');
+  const [isSubmitting, setIsSubmitting] = useState(false);
+
+  if (!isOpen) return null;
+
+  const handleSubmit = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!viewName.trim()) return;
+
+    setIsSubmitting(true);
+    try {
+      await onConfirmCreate(viewName);
+      setViewName('');
+      onClose();
+    } catch (error) {
+      console.error("Failed to create view:", error);
+    } finally {
+      setIsSubmitting(false);
+    }
+  };
+
+  return (
+    <Modal isOpen={isOpen} onClose={onClose} title="Create New View">
+      <form onSubmit={handleSubmit} className="flex flex-col gap-4">
+        <Input 
+          label="View Name" 
+          value={viewName} 
+          onChange={(e) => setViewName(e.target.value)} 
+          placeholder="e.g., Q3 High Priority Orders"
+          required
+        />
+        <div className="flex justify-end gap-2">
+          <Button type="button" variant="secondary" onClick={onClose}>Cancel</Button>
+          <Button type="submit" variant="primary" isLoading={isSubmitting}>Create View</Button>
+        </div>
+      </form>
+    </Modal>
+  );
+}
+The Reusable <ManageViewsModal />
+This modal takes a clean list of the current views and exposes delete (or rename) triggers.
+TypeScript
+// components/shared/views/ManageViewsModal.tsx
+import { SavedView } from '@/types/view';
+
+interface ManageViewsModalProps {
+  isOpen: boolean;
+  onClose: () => void;
+  views: SavedView<any>[];
+  onDeleteView: (viewId: string) => Promise<void>;
+}
+
+export function ManageViewsModal({ isOpen, onClose, views, onDeleteView }: ManageViewsModalProps) {
+  return (
+    <Modal isOpen={isOpen} onClose={onClose} title="Manage Saved Views">
+      <ul className="divide-y divide-gray-200">
+        {views.map((view) => (
+          <li key={view.id} className="flex justify-between items-center py-3">
+            <span className="text-sm font-medium text-gray-700">{view.name}</span>
+            {!view.isSystemDefault && (
+              <Button 
+                variant="danger" 
+                size="xs" 
+                onClick={() => onDeleteView(view.id)}
+              >
+                Delete
+              </Button>
+            )}
+          </li>
+        ))}
+      </ul>
+    </Modal>
+  );
+}
+________________________________________
+2. Incorporating the Modals globally into <ViewSelector />
+By keeping modal toggle flags inside the <ViewSelector /> itself, we completely hide the popup open/close state management away from your individual pages.
+TypeScript
+// components/shared/views/ViewSelector.tsx
+import { useState } from 'react';
+import { SavedView } from '@/types/view';
+import { CreateViewModal } from './CreateViewModal';
+import { ManageViewsModal } from './ManageViewsModal';
+
+interface ViewSelectorProps<T> {
+  views: SavedView<T>[];
+  activeViewId: string | null;
+  isDirty: boolean;
+  onViewChange: (viewId: string) => void;
+  onSaveCurrentView: () => void;
+  onRevertChanges: () => void;
+  
+  // Handlers for the internal shared modals
+  onCreateViewSubmit: (name: string) => Promise<void>;
+  onDeleteViewSubmit: (id: string) => Promise<void>;
+}
+
+export function ViewSelector<T>({
+  views, activeViewId, isDirty,
+  onViewChange, onSaveCurrentView, onRevertChanges,
+  onCreateViewSubmit, onDeleteViewSubmit
+}: ViewSelectorProps<T>) {
+  const [isCreateOpen, setIsCreateOpen] = useState(false);
+  const [isManageOpen, setIsManageOpen] = useState(false);
+
+  const activeView = views.find((v) => v.id === activeViewId);
+  const dropdownLabel = activeView ? `${activeView.name}${isDirty ? ' *' : ''}` : 'Select View';
+
+  return (
+    <>
+      <div className="flex items-center gap-3">
+        <Dropdown menuLabel={dropdownLabel}>
+          <DropdownGroup>
+            {views.map((v) => (
+              <DropdownItem key={v.id} isActive={v.id === activeViewId} onClick={() => onViewChange(v.id)}>
+                {v.name}
+              </DropdownItem>
+            ))}
+          </DropdownGroup>
+          <DropdownDivider />
+          <DropdownFooter>
+            {/* These action links simply trigger internal modal states */}
+            <DropdownFooterLink onClick={() => setIsCreateOpen(true)}>Create New View</DropdownFooterLink>
+            <DropdownFooterLink onClick={() => setIsManageOpen(true)}>Manage Views</DropdownFooterLink>
+          </DropdownFooter>
+        </Dropdown>
+
+        {isDirty && (
+          <div className="flex gap-2">
+            <Button onClick={onSaveCurrentView} variant="primary" size="sm">Save Changes</Button>
+            <Button onClick={onRevertChanges} variant="secondary" size="sm">Revert</Button>
+          </div>
+        )}
+      </div>
+
+      {/* Global Shared Modals encapsulated here */}
+      <CreateViewModal 
+        isOpen={isCreateOpen} 
+        onClose={() => setIsCreateOpen(false)} 
+        onConfirmCreate={onCreateViewSubmit} 
+      />
+      <ManageViewsModal 
+        isOpen={isManageOpen} 
+        onClose={() => setIsManageOpen(false)} 
+        views={views} 
+        onDeleteView={onDeleteViewSubmit} 
+      />
+    </>
+  );
+}
+________________________________________
+3. The Ultimate Clean Developer Experience (DX)
+Look at how beautifully clean a page feature component looks now. The developer of a new page doesn't have to think about modals, open/close variables, or button states at all. They just hook up their local custom context functions to the ViewSelector orchestrator:
+TypeScript
+// features/products/ProductCatalogDashboard.tsx
+import { ViewSelector } from '@/components/shared/views/ViewSelector';
+import { useProductContext } from './context/ProductContext';
+
+export function ProductCatalogDashboard() {
+  const {
+    views,
+    activeViewId,
+    isDirty,
+    changeView,
+    saveViewMutations,
+    revertToSaved,
+    createNewViewAPI,  // Handles extracting local state + posting name to /api/product-views
+    deleteViewAPI,      // Handles deleting via /api/product-views/:id
+  } = useProductContext();
+
+  return (
+    <div className="p-6">
+      <ViewSelector
+        views={views}
+        activeViewId={activeViewId}
+        isDirty={isDirty}
+        onViewChange={changeView}
+        onSaveCurrentView={saveViewMutations}
+        onRevertChanges={revertToSaved}
+        onCreateViewSubmit={createNewViewAPI}
+        onDeleteViewSubmit={deleteViewAPI}
+      />
+      
+      {/* Product Specific Filters & Material React Table here */}
+    </div>
+  );
+}
+Why this extension shines:
+•	True Zero-Bleed Isolation: The shared view components handle all operational layouts, and the page context handles all data transformation logic.
+•	Maintainability: If the UI/UX team decides to change the look of the "Manage View" popup layout down the road, you only have to modify it in one file, and every dashboard across your whole application instantly updates.
+
+To make this work seamlessly across different pages while keeping your types clean and secure, we design the Context API using TypeScript Generics.
+By defining a generic context factory or a reusable structural interface, each page can initialize its own standalone Context Provider, passing its specific FilterType down into the engine.
+Here is exactly how to design, define, and instantiate that Context API.
+________________________________________
+1. The Generic Context State Definition
+First, we define a structured TypeScript interface for the exact shape of our page context. We use a generic parameter F to represent the unique shape of that page's filters.
+TypeScript
+// types/dashboardContext.ts
+import { SavedView } from '@/types/view';
+
+export interface DashboardContextState<F> {
+  // 1. Views Array & Tracking
+  views: SavedView<F>[];
+  activeViewId: string | null;
+  isDirty: boolean;
+
+  // 2. Committed Configurations (What the Table & API read)
+  committedFilters: F;
+  columnVisibility: Record<string, boolean>;
+  columnOrder: string[];
+
+  // 3. Transient Selections (What the user changes BEFORE hitting Apply)
+  transientFilters: F;
+  setTransientFilters: React.Dispatch<React.SetStateAction<F>>;
+
+  // 4. Global UI States
+  isLoading: boolean;
+
+  // 5. Shared Orcheration Callbacks (Fed directly into ViewSelector & Table)
+  changeView: (viewId: string) => void;
+  applyTransientFilters: () => void;
+  resetTransientFilters: () => void;
+  saveCurrentView: () => Promise<void>;
+  revertToSaved: () => void;
+  createNewView: (name: string) => Promise<void>;
+  deleteView: (id: string) => Promise<void>;
+  
+  // 6. Material-React-Table Bound Handlers
+  setColumnVisibility: React.Dispatch<React.SetStateAction<Record<string, boolean>>>;
+  setColumnOrder: React.Dispatch<React.SetStateAction<string[]>>;
+}
+________________________________________
+2. Setting Up the Page Context & Provider
+Because React Context requires an initial value or explicit typing, we can't create a truly "dynamic" global context without sacrificing type safety. Instead, the cleanest architectural pattern is to create a Context Creator Function or instantiate a cleanly typed context per feature folder.
+Here is how a specific page (e.g., an Orders Dashboard) initializes this generic structure.
+TypeScript
+// features/orders/context/OrdersDashboardContext.tsx
+import React, { createContext, useContext, useState, useMemo, useEffect } from 'react';
+import { DashboardContextState } from '@/types/dashboardContext';
+import { SavedView } from '@/types/view';
+
+// 1. Define this specific page's unique filter footprint
+export interface OrderFilters {
+  status: ('pending' | 'shipped' | 'cancelled')[];
+  dateRange: { start: string | null; end: string | null };
+  minAmount: number;
+}
+
+// Default factory configurations for this page
+const initialFilters: OrderFilters = {
+  status: [],
+  dateRange: { start: null, end: null },
+  minAmount: 0,
+};
+
+// 2. Create the Context with the OrderFilters parameter
+const OrdersDashboardContext = createContext<DashboardContextState<OrderFilters> | undefined>(undefined);
+
+export const OrdersDashboardProvider: React.FC<{ children: React.ReactNode }> = ({ children }) => {
+  // DB State
+  const [views, setViews] = useState<SavedView<OrderFilters>[]>([]);
+  const [activeViewId, setActiveViewId] = useState<string | null>(null);
+  const [isLoading, setIsLoading] = useState(true);
+
+  // Layout States (Directly tied to Material-React-Table)
+  const [columnVisibility, setColumnVisibility] = useState<Record<string, boolean>>({});
+  const [columnOrder, setColumnOrder] = useState<string[]>([]);
+
+  // Filter States (Committed vs Transient)
+  const [committedFilters, setCommittedFilters] = useState<OrderFilters>(initialFilters);
+  const [transientFilters, setTransientFilters] = useState<OrderFilters>(initialFilters);
+
+  // 3. Find the current matching active view configuration
+  const activeView = useMemo(() => views.find(v => v.id === activeViewId), [views, activeViewId]);
+
+  // 4. Derived "isDirty" State Engine (Compares layout & filters to original view)
+  const isDirty = useMemo(() => {
+    if (!activeView) return false;
+    return (
+      JSON.stringify(committedFilters) !== JSON.stringify(activeView.filters) ||
+      JSON.stringify(columnVisibility) !== JSON.stringify(activeView.columnVisibility) ||
+      JSON.stringify(columnOrder) !== JSON.stringify(activeView.columnOrder)
+    );
+  }, [committedFilters, columnVisibility, columnOrder, activeView]);
+
+  // --- Handlers & Orchestration ---
+
+  const changeView = (viewId: string) => {
+    const targetView = views.find(v => v.id === viewId);
+    if (targetView) {
+      setActiveViewId(viewId);
+      setCommittedFilters(targetView.filters);
+      setTransientFilters(targetView.filters); // Sync dropdown transient UI
+      setColumnVisibility(targetView.columnVisibility);
+      setColumnOrder(targetView.columnOrder);
+    }
+  };
+
+  const applyTransientFilters = () => {
+    setCommittedFilters(transientFilters); // Flushes changes to Table/API query
+  };
+
+  const resetTransientFilters = () => {
+    setTransientFilters(initialFilters);
+    setCommittedFilters(initialFilters);
+  };
+
+  const revertToSaved = () => {
+    if (activeView) {
+      setCommittedFilters(activeView.filters);
+      setTransientFilters(activeView.filters);
+      setColumnVisibility(activeView.columnVisibility);
+      setColumnOrder(activeView.columnOrder);
+    }
+  };
+
+  const saveCurrentView = async () => {
+    if (!activeViewId) return;
+    // Mock API call saving current configuration to the server
+    // await api.put(`/views/${activeViewId}`, { committedFilters, columnVisibility, columnOrder });
+    
+    // Update local context array state to match server update
+    setViews(prev => prev.map(v => v.id === activeViewId 
+      ? { ...v, filters: committedFilters, columnVisibility, columnOrder } 
+      : v
+    ));
+  };
+
+  const createNewView = async (name: string) => {
+    const newViewPayload: SavedView<OrderFilters> = {
+      id: Math.random().toString(), // typically backend driven
+      name,
+      filters: committedFilters,
+      columnVisibility,
+      columnOrder
+    };
+    // await api.post('/views', newViewPayload);
+    setViews(prev => [...prev, newViewPayload]);
+    setActiveViewId(newViewPayload.id);
+  };
+
+  const deleteView = async (id: string) => {
+    // await api.delete(`/views/${id}`);
+    setViews(prev => prev.filter(v => v.id !== id));
+    if (activeViewId === id) {
+      setActiveViewId(null);
+      setCommittedFilters(initialFilters);
+      setTransientFilters(initialFilters);
+    }
+  };
+
+  return (
+    <OrdersDashboardContext.Provider value={{
+      views, activeViewId, isDirty, committedFilters, columnVisibility, columnOrder,
+      transientFilters, setTransientFilters, isLoading, changeView, applyTransientFilters,
+      resetTransientFilters, saveCurrentView, revertToSaved, createNewView, deleteView,
+      setColumnVisibility, setColumnOrder
+    }}>
+      {children}
+    </OrdersDashboardContext.Provider>
+  );
+};
+
+// 5. Export a strictly typed hook unique to this feature
+export const useOrdersDashboard = () => {
+  const context = useContext(OrdersDashboardContext);
+  if (!context) throw new Error('useOrdersDashboard must be used within an OrdersDashboardProvider');
+  return context;
+};
+________________________________________
+3. How the Context Connects to Your Components
+Because the API boundaries match up completely, hooking up Row 1 (Views), Row 2 (Filters), and Row 3 (Table) to this state machine becomes exceptionally clean.
+Row 1: The Dumb View Selector
+It just hooks up to the context handlers directly. It doesn't know what OrderFilters are; it just hands down data and triggers callbacks.
+TypeScript
+export function OrdersViewSelectorRow() {
+  const { 
+    views, activeViewId, isDirty, changeView, 
+    saveCurrentView, revertToSaved, createNewView, deleteView 
+  } = useOrdersDashboard();
+
+  return (
+    <ViewSelector
+      views={views}
+      activeViewId={activeViewId}
+      isDirty={isDirty}
+      onViewChange={changeView}
+      onSaveCurrentView={saveCurrentView}
+      onRevertChanges={revertToSaved}
+      onCreateViewSubmit={createNewView}
+      onDeleteViewSubmit={deleteView}
+    />
+  );
+}
+Row 2: The Filter Bar (Edits Transient State)
+The Filter Bar uses transientFilters and setTransientFilters to keep changes local until the user commits them via Apply.
+TypeScript
+export function OrdersFilterBar() {
+  const { transientFilters, setTransientFilters, applyTransientFilters, resetTransientFilters } = useOrdersDashboard();
+
+  return (
+    <div className="flex items-center gap-4">
+      {/* Dropdown 1: Mutates just its specific key in transient state */}
+      <StatusDropdown 
+        value={transientFilters.status}
+        onChange={(nextStatus) => setTransientFilters(p => ({ ...p, status: nextStatus }))}
+      />
+
+      {/* Action Buttons */}
+      <Button onClick={applyTransientFilters}>Apply</Button>
+      <Button onClick={resetTransientFilters} variant="text">Reset</Button>
+    </div>
+  );
+}
+Row 3: Material React Table (Directly bound to Context)
+Pass the values directly to your MRT configuration object. The table dynamically adapts when changes occur.
+TypeScript
+export function OrdersTable() {
+  const { committedFilters, columnVisibility, setColumnVisibility, columnOrder, setColumnOrder } = useOrdersDashboard();
+  
+  // Your API fetching hook looks directly at committedFilters
+  const { data, isLoading } = useFetchOrders(committedFilters); 
+
+  const table = useMaterialReactTable({
+    columns,
+    data,
+    state: {
+      columnVisibility,
+      columnOrder,
+      isLoading,
+    },
+    onColumnVisibilityChange: setColumnVisibility,
+    onColumnOrderChange: setColumnOrder,
+  });
+
+  return <MaterialReactTable table={table} />;
+}
+
+Here is the structural implementation showing how all these components, layers, and context properties fit together into a unified, high-performance page.
+To bring everything together cleanly, this final page wraps the entire layout inside the <OrdersDashboardProvider> we defined earlier. Then, it maps the context-driven states to Row 1 (Views), Row 2 (Filters), and Row 3 (The Data Table).
+________________________________________
+The Complete Dashboard Assembly (OrdersDashboardPage.tsx)
+TypeScript
+import React from 'react';
+import { 
+  OrdersDashboardProvider, 
+  useOrdersDashboard 
+} from './context/OrdersDashboardContext';
+import { ViewSelector } from '@/components/shared/views/ViewSelector';
+import { useFetchOrders } from './hooks/useFetchOrders';
+import { useMaterialReactTable, MaterialReactTable } from 'material-react-table';
+
+// Assume standard column definitions exist here
+import { orderTableColumns } from './utils/columns'; 
+
+/**
+ * ROW 1: View Control Center
+ * Manages saved view states, dirty detection, and orchestrates saving/reverting layout configurations.
+ */
+function Row1ViewManagement() {
+  const { 
+    views, 
+    activeViewId, 
+    isDirty, 
+    changeView, 
+    saveCurrentView, 
+    revertToSaved, 
+    createNewView, 
+    deleteView 
+  } = useOrdersDashboard();
+
+  return (
+    <div className="flex justify-between items-center border-b border-gray-100 pb-4">
+      <div>
+        <h1 className="text-xl font-bold text-gray-900">Orders Logistics Hub</h1>
+        <p className="text-xs text-gray-500">Manage pipeline configurations and metrics layout.</p>
+      </div>
+      
+      {/* Our shared, generic view selector component */}
+      <ViewSelector
+        views={views}
+        activeViewId={activeViewId}
+        isDirty={isDirty}
+        onViewChange={changeView}
+        onSaveCurrentView={saveCurrentView}
+        onRevertChanges={revertToSaved}
+        onCreateViewSubmit={createNewView}
+        onDeleteViewSubmit={deleteView}
+      />
+    </div>
+  );
+}
+
+/**
+ * ROW 2: Transient Filter Control Bar
+ * Houses local selections. State modifications here do NOT refetch data or re-render 
+ * the table until the explicit "Apply" transaction is triggered.
+ */
+function Row2FilterBar() {
+  const { 
+    transientFilters, 
+    setTransientFilters, 
+    applyTransientFilters, 
+    resetTransientFilters 
+  } = useOrdersDashboard();
+
+  return (
+    <div className="flex flex-wrap items-center justify-between gap-4 bg-gray-50 p-4 rounded-lg border border-gray-200">
+      <div className="flex items-center gap-3">
+        {/* Mock Filter 1: Status Multi-select */}
+        <div className="flex flex-col gap-1">
+          <label className="text-xs font-semibold text-gray-600">Order Status</label>
+          <select 
+            multiple
+            className="rounded border-gray-300 text-sm p-1"
+            value={transientFilters.status}
+            onChange={(e) => {
+              const options = Array.from(e.target.selectedOptions, option => option.value as any);
+              setTransientFilters(prev => ({ ...prev, status: options }));
+            }}
+          >
+            <option value="pending">Pending</option>
+            <option value="shipped">Shipped</option>
+            <option value="cancelled">Cancelled</option>
+          </select>
+        </div>
+
+        {/* Mock Filter 2: Min Revenue Threshold */}
+        <div className="flex flex-col gap-1">
+          <label className="text-xs font-semibold text-gray-600">Min Amount ($)</label>
+          <input 
+            type="number"
+            className="rounded border-gray-300 text-sm p-1 w-28"
+            value={transientFilters.minAmount}
+            onChange={(e) => setTransientFilters(prev => ({ ...prev, minAmount: Number(e.target.value) }))}
+          />
+        </div>
+      </div>
+
+      {/* Confirmation Boundaries */}
+      <div className="flex items-center gap-2 self-end">
+        <button 
+          onClick={resetTransientFilters}
+          className="px-3 py-1.5 text-sm font-medium text-gray-600 hover:text-gray-900 transition"
+        >
+          Reset
+        </button>
+        <button 
+          onClick={applyTransientFilters}
+          className="px-4 py-1.5 bg-blue-600 hover:bg-blue-700 text-white text-sm font-medium rounded shadow transition"
+        >
+          Apply Filters
+        </button>
+      </div>
+    </div>
+  );
+}
+
+/**
+ * ROW 3: Data Presentation Layer
+ * Subscribed directly to committed context state. Seamlessly hooks up visibility changes
+ * and column drag re-ordering callbacks to run layout delta assessments.
+ */
+function Row3DataTable() {
+  const { 
+    committedFilters, 
+    columnVisibility, 
+    setColumnVisibility, 
+    columnOrder, 
+    setColumnOrder 
+  } = useOrdersDashboard();
+
+  // Custom data-fetching hook executing network requests when committedFilters updates
+  const { data, dataLoading } = useFetchOrders(committedFilters);
+
+  // Material-React-Table engine instantiation
+  const table = useMaterialReactTable({
+    columns: orderTableColumns,
+    data: data ?? [],
+    enableColumnOrdering: true,
+    enableColumnDragging: true,
+    
+    // Controlled layout parameters synced with Context API
+    state: {
+      columnVisibility,
+      columnOrder,
+      isLoading: dataLoading,
+    },
+    onColumnVisibilityChange: setColumnVisibility,
+    onColumnOrderChange: setColumnOrder,
+    
+    // Additional presentational options
+    initialState: { density: 'compact' },
+    muiTablePaperProps: { elevation: 0, variant: 'outlined' }
+  });
+
+  return (
+    <div className="w-full bg-white rounded-lg border border-gray-200 overflow-hidden">
+      <MaterialReactTable table={table} />
+    </div>
+  );
+}
+
+/**
+ * MASTER COMPONENT ENTRYPOINT
+ * Handles dependency injection of context boundaries down the DOM tree.
+ */
+export default function OrdersDashboardPage() {
+  return (
+    <OrdersDashboardProvider>
+      <div className="max-w-7xl mx-auto p-6 flex flex-col gap-6 font-sans">
+        
+        {/* Row 1: View Configuration Shell */}
+        <Row1ViewManagement />
+
+        {/* Row 2: Performance-isolated Transient Filter Panel */}
+        <Row2FilterBar />
+
+        {/* Row 3: Live Table Subscriptions */}
+        <Row3DataTable />
+
+      </div>
+    </OrdersDashboardProvider>
+  );
+}
+________________________________________
+Architectural Verification Checklist
+Reviewing how this file explicitly fulfills your optimization parameters:
+•	No Redux / TanStack Query Bloat: State transitions are local, native, fast, and entirely compartmentalized inside the single feature's virtual state machine context.
+•	Component-Level Reusability: <ViewSelector /> is entirely blind to the implementation details of this dashboard. It acts as an orchestrator component receiving its values from the page layer.
+•	Render-Blast Protection (Performance): Notice that picking variations or modifying elements inside <Row2FilterBar /> changes local transientFilters. This avoids causing <Row3DataTable /> or your API queries to flicker, freeze, or invoke multi-pass paints until the user confirms the action by selecting Apply Filters.
+•	Automatic Layout Syncing: Dragging columns in <Row3DataTable /> triggers state handlers which sync back up into Row 1 to smoothly reveal the Save Changes and Revert actions on the fly.
+
+
+Here is the fully realized implementation of the generic, reusable <ViewSelector /> component.
+This component acts as a "smart container with internal UI state" that completely encapsulates the dropdown logic, the visibility of the "Save/Revert" buttons, and the open/close state toggles for your shared Create and Manage modals.
+________________________________________
+The Shared View Selector (components/shared/views/ViewSelector.tsx)
+TypeScript
+import React, { useState } from 'react';
+import { SavedView } from '@/types/view';
+import { CreateViewModal } from './CreateViewModal';
+import { ManageViewsModal } from './ManageViewsModal';
+
+interface ViewSelectorProps<T> {
+  // Core Array Data
+  views: SavedView<T>[];
+  activeViewId: string | null;
+  isDirty: boolean;
+  
+  // Basic Event Emitters
+  onViewChange: (viewId: string) => void;
+  onSaveCurrentView: () => Promise<void> | void;
+  onRevertChanges: () => void;
+  
+  // API Integration Triggers passed from Page Context
+  onCreateViewSubmit: (name: string) => Promise<void>;
+  onDeleteViewSubmit: (id: string) => Promise<void>;
+}
+
+export function ViewSelector<T>({
+  views,
+  activeViewId,
+  isDirty,
+  onViewChange,
+  onSaveCurrentView,
+  onRevertChanges,
+  onCreateViewSubmit,
+  onDeleteViewSubmit,
+}: ViewSelectorProps<T>) {
+  // 1. Local UI visibility flags for encapsulated popups
+  const [isDropdownOpen, setIsDropdownOpen] = useState(false);
+  const [isCreateOpen, setIsCreateOpen] = useState(false);
+  const [isManageOpen, setIsManageOpen] = useState(false);
+  const [isSaving, setIsSaving] = useState(false);
+
+  // 2. Identify current active layout context metadata
+  const activeView = views.find((v) => v.id === activeViewId);
+  
+  // Append dirty indicator to view text label dynamically
+  const displayLabel = activeView 
+    ? `${activeView.name}${isDirty ? ' *' : ''}` 
+    : 'Select Dashboard View';
+
+  const handleSaveClick = async () => {
+    setIsSaving(true);
+    try {
+      await onSaveCurrentView();
+    } catch (err) {
+      console.error('Failed to update current view configuration profile:', err);
+    } finally {
+      setIsSaving(false);
+    }
+  };
+
+  return (
+    <div className="relative inline-flex items-center gap-3">
+      
+      {/* DROPDOWN SELECTOR ENGINE */}
+      <div className="relative">
+        <button
+          type="button"
+          onClick={() => setIsDropdownOpen((prev) => !prev)}
+          className={`inline-flex items-center justify-between min-w-[220px] px-4 py-2 text-sm font-medium border rounded-md shadow-sm transition-all focus:outline-none focus:ring-2 focus:ring-blue-500 ${
+            isDirty 
+              ? 'border-amber-300 bg-amber-50 text-amber-900 hover:bg-amber-100' 
+              : 'border-gray-300 bg-white text-gray-700 hover:bg-gray-50'
+          }`}
+        >
+          <span className="truncate">{displayLabel}</span>
+          <svg className="w-4 h-4 ml-2 -mr-1 text-gray-400" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19 9l-7 7-7-7" />
+          </svg>
+        </button>
+
+        {isDropdownOpen && (
+          <>
+            {/* Backdrop click overlay closer */}
+            <div className="fixed inset-0 z-10" onClick={() => setIsDropdownOpen(false)} />
+            
+            <div className="absolute right-0 w-64 mt-2 origin-top-right bg-white border border-gray-200 rounded-md shadow-xl z-20 focus:outline-none overflow-hidden animate-fade-in">
+              {/* SAVED VIEW ITERATION REGION */}
+              <div className="max-h-60 overflow-y-auto py-1">
+                {views.length === 0 ? (
+                  <p className="px-4 py-3 text-xs italic text-gray-400 text-center">No views registered</p>
+                ) : (
+                  views.map((view) => (
+                    <button
+                      key={view.id}
+                      type="button"
+                      onClick={() => {
+                        onViewChange(view.id);
+                        setIsDropdownOpen(false);
+                      }}
+                      className={`flex items-center justify-between w-full text-left px-4 py-2.5 text-sm transition-colors ${
+                        view.id === activeViewId
+                          ? 'bg-blue-50 text-blue-900 font-semibold'
+                          : 'text-gray-700 hover:bg-gray-50'
+                      }`}
+                    >
+                      <span className="truncate">{view.name}</span>
+                      {view.id === activeViewId && (
+                        <svg className="w-4 h-4 text-blue-600" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                          <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M5 13l4 4L19 7" />
+                        </svg>
+                      )}
+                    </button>
+                  ))
+                )}
+              </div>
+
+              {/* BOUNDARY FOOTER ACTIONS PANEL */}
+              <div className="border-t border-gray-100 bg-gray-50 px-2 py-1.5 flex flex-col gap-0.5">
+                <button
+                  type="button"
+                  onClick={() => {
+                    setIsCreateOpen(true);
+                    setIsDropdownOpen(false);
+                  }}
+                  className="flex w-full items-center px-3 py-1.5 text-xs font-medium text-blue-600 hover:bg-blue-100 hover:text-blue-700 rounded transition"
+                >
+                  <svg className="w-3.5 h-3.5 mr-2" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 4v16m8-8H4" />
+                  </svg>
+                  Create New View
+                </button>
+                <button
+                  type="button"
+                  onClick={() => {
+                    setIsManageOpen(true);
+                    setIsDropdownOpen(false);
+                  }}
+                  className="flex w-full items-center px-3 py-1.5 text-xs font-medium text-gray-600 hover:bg-gray-200 hover:text-gray-900 rounded transition"
+                >
+                  <svg className="w-3.5 h-3.5 mr-2" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M10.325 4.317c.426-1.756 2.924-1.756 3.35 0a1.724 1.724 0 002.573 1.066c1.543-.94 3.31.826 2.37 2.37a1.724 1.724 0 001.065 2.572c1.756.426 1.756 2.924 0 3.35a1.724 1.724 0 00-1.066 2.573c.94 1.543-.826 3.31-2.37 2.37a1.724 1.724 0 00-2.572 1.065c-.426 1.756-2.924 1.756-3.35 0a1.724 1.724 0 00-2.573-1.066c-1.543.94-3.31-.826-2.37-2.37a1.724 1.724 0 00-1.065-2.572c-1.756-.426-1.756-2.924 0-3.35a1.724 1.724 0 001.066-2.573c-.94-1.543.826-3.31 2.37-2.37.996.608 2.296.07 2.572-1.065z" />
+                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M15 12a3 3 0 11-6 0 3 3 0 016 0z" />
+                  </svg>
+                  Manage System Views
+                </button>
+              </div>
+            </div>
+          </>
+        )}
+      </div>
+
+      {/* TRANSACTION STATE ACTION TRIGGER REGION */}
+      {isDirty && (
+        <div className="flex items-center gap-2 animate-fade-in">
+          <button
+            type="button"
+            disabled={isSaving}
+            onClick={handleSaveClick}
+            className="inline-flex items-center px-3 py-1.5 border border-transparent text-xs font-medium rounded shadow-sm text-white bg-emerald-600 hover:bg-emerald-700 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-emerald-500 disabled:opacity-50 transition"
+          >
+            {isSaving ? 'Saving...' : 'Save Changes'}
+          </button>
+          <button
+            type="button"
+            disabled={isSaving}
+            onClick={onRevertChanges}
+            className="inline-flex items-center px-3 py-1.5 border border-gray-300 text-xs font-medium rounded shadow-sm text-gray-700 bg-white hover:bg-gray-50 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-blue-500 disabled:opacity-50 transition"
+          >
+            Revert
+          </button>
+        </div>
+      )}
+
+      {/* PORTAL CAPSULED POPUPS */}
+      <CreateViewModal
+        isOpen={isCreateOpen}
+        onClose={() => setIsCreateOpen(false)}
+        onConfirmCreate={onCreateViewSubmit}
+      />
+
+      <ManageViewsModal
+        isOpen={isManageOpen}
+        onClose={() => setIsManageOpen(false)}
+        views={views}
+        onDeleteView={onDeleteViewSubmit}
+      />
+
+    </div>
+  );
+}
+________________________________________
+Core Structural Features of This Code:
+1.	Unconstrained Generic Flag (<T>): The declaration uses standard React typescript generic type arguments. Notice that the payload schema signature maps dynamically as views: SavedView<T>[]. The component itself has zero knowledge about your database data layers, making it highly reusable.
+2.	Encapsulated Popups: The modal open flags (isCreateOpen, isManageOpen) live entirely within the internal state hooks here. The hosting layout page doesn't have to keep track of any modal variables or click states.
+3.	Optimistic Loading Protection: The Save Changes handler sets local state to isSaving instantly upon trigger. This prevents double-clicks from calling your database multiple times if network responses are slow.
+4.	Visual Context Feedback: The dropdown button dynamically updates its color profile to a warm amber background when isDirty is true, providing clear feedback that there are unsaved layout or filter changes.
+Here is the complete, modular TypeScript definition for the DashboardContextState.
+This interface defines the operational contract for your localized state engine. It uses a TypeScript generic (F) to represent the page-specific filter structure, allowing the exact same context skeleton to safely support any dashboard across your app.
+The Context Type Definitions (types/dashboardContext.ts)
+TypeScript
+import React from 'react';
+import { SavedView } from './view';
+
+/**
+ * Generic blueprint managing state distribution across rows 1, 2, and 3.
+ * @template F The custom object shape representing a unique page's filter fields.
+ */
+export interface DashboardContextState<F> {
+  // ==========================================
+  // 1. VIEW CONFIGURATION ENGINE (ROW 1)
+  // ==========================================
+  /** Collection of views available for this dashboard fetched from the API */
+  views: SavedView<F>[];
+  
+  /** The currently selected view ID. Null means factory defaults are applied */
+  activeViewId: string | null;
+  
+  /** Evaluates to true if current layout parameters don't match the database view configuration */
+  isDirty: boolean;
+
+  // ==========================================
+  // 2. COMMITTED DATA & LAYOUTS (ROW 3 / API)
+  // ==========================================
+  /** Filter values currently driving data fetches and API parameterization */
+  committedFilters: F;
+  
+  /** Material-React-Table controlled layout visibility schema */
+  columnVisibility: Record<string, boolean>;
+  
+  /** Material-React-Table controlled layout order tracking list */
+  columnOrder: string[];
+  
+  /** Global loading overlay flag tied to data-layer requests */
+  isLoading: boolean;
+
+  // ==========================================
+  // 3. TRANSIENT DROPDOWN CONTROLS (ROW 2)
+  // ==========================================
+  /** Temporary, uncommitted filter changes sitting inside dropdown states before 'Apply' is pressed */
+  transientFilters: F;
+  
+  /** Local state dispatcher for mutating temporary dropdown filter checkboxes/inputs */
+  setTransientFilters: React.Dispatch<React.SetStateAction<F>>;
+
+  // ==========================================
+  // 4. ACTION CALLBACK HANDLERS
+  // ==========================================
+  /** Switches view profile and flushes its saved parameters down to filters and table states */
+  changeView: (viewId: string) => void;
+  
+  /** Commits temporary dropdown selections into live query filters, triggering an API fetch */
+  applyTransientFilters: () => void;
+  
+  /** flushes filter profiles back to their factory layout settings */
+  resetTransientFilters: () => void;
+  
+  /** Makes an API PUT/POST request updating the database configuration with current view parameters */
+  saveCurrentView: () => Promise<void>;
+  
+  /** Discards all temporary table mutations, pulling pristine layouts back from the active view object */
+  revertToSaved: () => void;
+  
+  /** Accepts a target label name, serializes current layout states, and posts a new view object to the server */
+  createNewView: (name: string) => Promise<void>;
+  
+  /** Removes an entry from the database layer and falls back cleanly to primary defaults */
+  deleteView: (id: string) => Promise<void>;
+
+  // ==========================================
+  // 5. MATERIAL-REACT-TABLE STATE HOOKS
+  // ==========================================
+  /** Directly intercept and bind material-react-table's column visibility setters */
+  setColumnVisibility: React.Dispatch<React.SetStateAction<Record<string, boolean>>>;
+  
+  /** Directly intercept and bind material-react-table's column layout reordering setters */
+  setColumnOrder: React.Dispatch<React.SetStateAction<string[]>>;
+}
+Supporting Prerequisite View Schema (types/view.ts)
+For completeness, here is the SavedView structure that the context shape depends on:
+TypeScript
+/**
+ * Database structural record for a dashboard view configuration.
+ * @template TFilters The dynamic filter foot-print matching its host page.
+ */
+export interface SavedView<TFilters = Record<string, any>> {
+  id: string;
+  name: string;
+  isSystemDefault?: boolean;
+  
+  // Custom snapshot payloads
+  filters: TFilters;
+  columnVisibility: Record<string, boolean>;
+  columnOrder: string[];
+}
+Architectural Benefits of This Contract
+•	Clean Context Segregation: By dividing state into transientFilters (Row 2 UI updates) and committedFilters (Row 3 API executions), you prevent input lag.
+•	Typing Flexibility: When declaring a context file for a dashboard, your code looks exceptionally clean:
+TypeScript
+// Example inside an Payments Dashboard Context definition
+const PaymentsDashboardContext = createContext<DashboardContextState<PaymentFilters> | undefined>(undefined);
+•	Seamless MRT Interception: The inclusion of setColumnVisibility and setColumnOrder makes hooking into material-react-table state change handlers native and frictionless.
+This is a common requirement in enterprise software: a single page might host multiple variations of a workspace (e.g., a "Tickets" page that toggles between "Bug Items" and "Feature Request Items," each requiring completely different filters and columns). Meanwhile, other pages remain simple and don't need any sub-type variant.
+To cleanly handle this without breaking our architectural model, we can treat the subType as an optional configuration tier in our database schema and context.
+Here is how we adapt the types, the Context API, and the dashboard implementation to handle pages with or without sub-types seamlessly.
+________________________________________
+1. Updated Generic View Schema
+We update the SavedView structure to optionally include screenName and subType. If a page doesn't have a sub-type, subType simply defaults to undefined or a standard string fallback like "DEFAULT".
+TypeScript
+// types/view.ts
+export interface SavedView<TFilters = Record<string, any>> {
+  id: string;
+  name: string;
+  screenName: string;         // Identifies the main page (e.g., "ORDERS_PAGE")
+  subType?: string;           // Optional sub-flavor (e.g., "B2B_ORDERS" vs "B2C_ORDERS")
+  isSystemDefault?: boolean;
+  
+  // Layout Payloads
+  filters: TFilters;
+  columnVisibility: Record<string, boolean>;
+  columnOrder: string[];
+}
+________________________________________
+2. Adapting the Context API
+When a page does support sub-types, changing the sub-type must swap out the available list of views, reset the columns, and clear the filters.
+We expand the generic context interface to include an optional subType state tracker.
+TypeScript
+// types/dashboardContext.ts
+import { SavedView } from './view';
+
+export interface DashboardContextState<F> {
+  // Views Array & Global Filters
+  allViews: SavedView<F>[];          // ALL views for this screen name
+  views: SavedView<F>[];             // FILTERED views matching the current subType
+  activeViewId: string | null;
+  isDirty: boolean;
+  
+  // Sub-Type Strategy (Optional Tier)
+  currentSubType?: string;           // Present if the page has sub-flavors
+  changeSubType?: (newSubType: string) => void; 
+
+  // Committed Layout States
+  committedFilters: F;
+  columnVisibility: Record<string, boolean>;
+  columnOrder: string[];
+  isLoading: boolean;
+
+  // Transient States
+  transientFilters: F;
+  setTransientFilters: React.Dispatch<React.SetStateAction<F>>;
+
+  // Shared Modals & Layout Actions
+  changeView: (viewId: string) => void;
+  applyTransientFilters: () => void;
+  resetTransientFilters: () => void;
+  saveCurrentView: () => Promise<void>;
+  revertToSaved: () => void;
+  createNewView: (name: string) => Promise<void>;
+  deleteView: (id: string) => Promise<void>;
+  setColumnVisibility: React.Dispatch<React.SetStateAction<Record<string, boolean>>>;
+  setColumnOrder: React.Dispatch<React.SetStateAction<string[]>>;
+}
+________________________________________
+3. Implementation Scenario A: A Page WITH Sub-Types
+Here is how the Context Provider handles the internal filtering when a page relies heavily on sub-types.
+Notice how views is automatically derived using useMemo based on the active currentSubType.
+TypeScript
+// features/orders/context/OrdersDashboardContext.tsx
+import React, { createContext, useContext, useState, useMemo } from 'react';
+import { DashboardContextState } from '@/types/dashboardContext';
+import { SavedView } from '@/types/view';
+import { OrderFilters, getFactoryDefaultsForSubType } from '../utils/orderHelpers';
+
+const OrdersDashboardContext = createContext<DashboardContextState<OrderFilters> | undefined>(undefined);
+
+export const OrdersDashboardProvider: React.FC<{ children: React.ReactNode }> = ({ children }) => {
+  // 1. Raw API state array containing views across all sub-types for this screen
+  const [allViews, setAllViews] = useState<SavedView<OrderFilters>>([]);
+  const [currentSubType, setCurrentSubType] = useState<string>('B2B_ORDERS');
+  const [activeViewId, setActiveViewId] = useState<string | null>(null);
+
+  // Table & Filter layout states
+  const [columnVisibility, setColumnVisibility] = useState({});
+  const [columnOrder, setColumnOrder] = useState<string[]>([]);
+  const [committedFilters, setCommittedFilters] = useState<OrderFilters>({});
+  const [transientFilters, setTransientFilters] = useState<OrderFilters>({});
+
+  // 2. PERFORMANCE/LOGIC GATE: Filter views dynamically by the active sub-type
+  const views = useMemo(() => {
+    return allViews.filter(view => view.screenName === 'ORDERS_PAGE' && view.subType === currentSubType);
+  }, [allViews, currentSubType]);
+
+  const activeView = useMemo(() => views.find(v => v.id === activeViewId), [views, activeViewId]);
+
+  // 3. Orchestration Action: What happens when the user switches sub-types entirely
+  const changeSubType = (newSubType: string) => {
+    setCurrentSubType(newSubType);
+    
+    // Find the default view for this new sub-type variant
+    const subTypeViews = allViews.filter(v => v.subType === newSubType);
+    const defaultView = subTypeViews.find(v => v.isSystemDefault) || subTypeViews[0];
+
+    if (defaultView) {
+      setActiveViewId(defaultView.id);
+      setCommittedFilters(defaultView.filters);
+      setTransientFilters(defaultView.filters);
+      setColumnVisibility(defaultView.columnVisibility);
+      setColumnOrder(defaultView.columnOrder);
+    } else {
+      // Fall back to clean default layouts if no view rules are written yet
+      const blankLayout = getFactoryDefaultsForSubType(newSubType);
+      setActiveViewId(null);
+      setCommittedFilters(blankLayout.filters);
+      setTransientFilters(blankLayout.filters);
+      setColumnVisibility(blankLayout.columnVisibility);
+      setColumnOrder(blankLayout.columnOrder);
+    }
+  };
+
+  // 4. Inject subType parameters into API creation routines
+  const createNewView = async (name: string) => {
+    const newViewPayload: SavedView<OrderFilters> = {
+      id: Math.random().toString(),
+      name,
+      screenName: 'ORDERS_PAGE',
+      subType: currentSubType, // Injected context level parameter
+      filters: committedFilters,
+      columnVisibility,
+      columnOrder
+    };
+    setAllViews(prev => [...prev, newViewPayload]);
+    setActiveViewId(newViewPayload.id);
+  };
+
+  /* Remaining CRUD methods (deleteView, saveCurrentView, etc.) operate smoothly 
+     by mutating the allViews master tracker array */
+
+  return (
+    <OrdersDashboardContext.Provider value={{
+      allViews, views, activeViewId, currentSubType, changeSubType, createNewView,
+      committedFilters, columnVisibility, columnOrder, transientFilters, setTransientFilters,
+      /* ... rest of parameters mapped */
+    }}>
+      {children}
+    </OrdersDashboardContext.Provider>
+  );
+};
+________________________________________
+4. Implementation Scenario B: A Page WITHOUT Sub-Types
+If a page (e.g., a simple Settings Audit Log) has zero structural sub-flavors, the developer completely ignores the subType configuration. Look at how clean the code stays:
+TypeScript
+// features/audit/context/AuditDashboardContext.tsx
+import React, { createContext, useState, useMemo } from 'react';
+import { DashboardContextState } from '@/types/dashboardContext';
+import { SavedView } from '@/types/view';
+
+export interface AuditFilters { actionType: string; userId: string; }
+
+const AuditDashboardContext = createContext<DashboardContextState<AuditFilters> | undefined>(undefined);
+
+export const AuditDashboardProvider: React.FC<{ children: React.ReactNode }> = ({ children }) => {
+  const [allViews, setAllViews] = useState<SavedView<AuditFilters>>([]);
+  const [activeViewId, setActiveViewId] = useState<string | null>(null);
+
+  // For this page, "views" is just filtered strictly by the main Screen Name
+  const views = useMemo(() => {
+    return allViews.filter(view => view.screenName === 'AUDIT_LOGS_PAGE');
+  }, [allViews]);
+
+  const createNewView = async (name: string) => {
+    const newViewPayload: SavedView<AuditFilters> = {
+      id: Math.random().toString(),
+      name,
+      screenName: 'AUDIT_LOGS_PAGE',
+      // subType is safely skipped or left undefined
+      filters: committedFilters,
+      columnVisibility,
+      columnOrder
+    };
+    setAllViews(prev => [...prev, newViewPayload]);
+    setActiveViewId(newViewPayload.id);
+  };
+
+  return (
+    <AuditDashboardContext.Provider value={{
+      allViews, views, activeViewId, createNewView,
+      // currentSubType and changeSubType are simply omitted from execution
+      /* ... rest of parameters mapped */
+    }}>
+      {children}
+    </AuditDashboardContext.Provider>
+  );
+};
+________________________________________
+5. Reviewing the Reusable <ViewSelector />
+Because our view selector component accepts views: SavedView<T>[] as a direct property, it requires absolutely zero changes!
+•	On a sub-type dashboard, the page context passes it the pre-filtered views list matching the active sub-type workspace.
+•	On a standard dashboard, the context simply feeds it the general screen-level views list.
+The dropdown component continues to be an agnostic presentation shell that functions beautifully under both layouts:
+TypeScript
+// Inside any page shell component (With or Without Sub-Types)
+const { views, activeViewId, isDirty, changeView, createNewView, deleteView } = useDashboard();
+
+return (
+  <ViewSelector
+    views={views} // This is already correctly pre-sorted by context!
+    activeViewId={activeViewId}
+    isDirty={isDirty}
+    onViewChange={changeView}
+    onCreateViewSubmit={createNewView}
+    onDeleteViewSubmit={deleteView}
+    onSaveCurrentView={saveCurrentView}
+    onRevertChanges={revertToSaved}
+  />
+);
+Architectural Wrap-up
+By placing the responsibility of subType evaluation directly within the local page context providers, your base layouts remain clean and highly performant. Complex multi-flavored pages isolate their sub-type sorting logic internally, while simple screens remain unburdened by properties they don't need.
+To answer your question directly: No, the <ViewSelector /> should absolutely not make the API call to fetch the list of views. If the view selector made its own API calls, it would become tightly coupled to a specific database endpoint. It would no longer be a reusable shared component, and you wouldn't be able to drop it onto different pages with different workflows.
+The actual API network transactions should happen at the Page Context level (via custom hooks called inside your Context Provider). The Context behaves as the brain, while components like the view selector, filter bar, and table act as the hands and eyes.
+Here is the exact data-fetching architecture for the 3 distinct data streams: Views, Filter Dropdown values, and Table Data.
+________________________________________
+The Data Fetching Architecture
+To keep the page highly performant and ensure the table doesn't reload stutteringly, we segregate data fetching into two categories: Static/Lookups (load once on page mount) and Dynamic (re-fetch when parameters change).
+                 [ Page Router / Parent Entrypoint ]
+                                 │
+                   ┌─────────────┴─────────────┐
+                   ▼                           ▼
+       [ Page Context Provider ] ───► [ Initial Static Hook ]
+                   │                     (Fetch Views & Dropdown Options)
+                   │
+         ┌─────────┼─────────┐
+         ▼         ▼         ▼
+     Row 1 UI  Row 2 UI  [ Dynamic Table Hook ] ◄── (Re-fetches on 'Apply')
+   (Selector)  (Filters)     └─► Row 3 UI (Table)
+1. Where to Fetch the List of Views
+•	Location: Inside a custom hook (e.g., useFetchSavedViews) executed inside the Page Context Provider.
+•	The Logic: On page mount, this hook makes an API call passing the current screenName (and optionally subType). It stores the result in the context's allViews state. The context then distributes this array to the <ViewSelector /> via simple props.
+2. Where to Fetch the Filter Dropdown Options
+•	Location: Inside the Page Context Provider or the wrapper Filter Bar Component.
+•	The Logic: Options for your dropdowns (e.g., the list of all possible "Statuses", "Regions", or "Assignees") are typically lookup data. They should be fetched once when the page loads.
+•	Pro Tip: If multiple dropdowns depend on each other (e.g., selecting Region A changes the options in the City dropdown), fetch this data at the Context level so the cascading logic can be calculated cleanly before hitting the UI.
+3. Where to Fetch the Table Data
+•	Location: Inside a dynamic custom hook (e.g., useFetchTableData) executed directly inside the Table Container Component or the Context Provider, reactive only to committedFilters.
+•	The Logic: This hook monitors committedFilters. When the page first loads, it uses the default view's filters. When a user clicks Apply, committedFilters updates, instantly causing this hook to trigger a new Axios/Fetch request to get the fresh dataset.
+________________________________________
+Architectural Implementation Example
+Here is how this setup looks inside your feature folder, cleanly separating your API network requests from your UI presentation:
+TypeScript
+// features/orders/context/OrdersDashboardContext.tsx
+import React, { createContext, useContext, useState, useEffect } from 'react';
+import { useFetchOrdersLookups } from '../hooks/useFetchOrdersLookups';
+import { useFetchPageViews } from '../hooks/useFetchPageViews';
+
+export const OrdersDashboardProvider: React.FC<{ children: React.ReactNode }> = ({ children }) => {
+  const [currentSubType, setCurrentSubType] = useState('B2B_ORDERS');
+  
+  // 1. Fetch Lookups (Dropdown Values) once on mount
+  const { statuses, regions, lookupsLoading } = useFetchOrdersLookups(currentSubType);
+
+  // 2. Fetch Saved Views once on mount (or when subType changes)
+  const { allViews, viewsLoading, setAllViews } = useFetchPageViews('ORDERS_PAGE');
+
+  // Local Layout states
+  const [activeViewId, setActiveViewId] = useState<string | null>(null);
+  const [committedFilters, setCommittedFilters] = useState({});
+  const [transientFilters, setTransientFilters] = useState({});
+  const [columnVisibility, setColumnVisibility] = useState({});
+  const [columnOrder, setColumnOrder] = useState<string[]>([]);
+
+  // ... sync functions (changeView, applyTransientFilters, etc.)
+
+  const isLoading = lookupsLoading || viewsLoading;
+
+  return (
+    <OrdersDashboardContext.Provider value={{
+      views: allViews.filter(v => v.subType === currentSubType),
+      dropdownOptions: { statuses, regions }, // Passed down to Row 2 Filter Dropdowns
+      committedFilters,
+      isLoading,
+      // ... rest of shared state
+    }}>
+      {children}
+    </OrdersDashboardContext.Provider>
+  );
+};
+And then, inside Row 3 (The Table Container), you isolate the actual data row queries:
+TypeScript
+// features/orders/components/Row3DataTable.tsx
+import { useOrdersDashboard } from '../context/OrdersDashboardContext';
+import { useFetchOrdersGridRows } from '../hooks/useFetchOrdersGridRows';
+
+export function Row3DataTable() {
+  const { committedFilters, currentSubType, columnVisibility, columnOrder } = useOrdersDashboard();
+
+  // 3. This hook runs ONLY when committedFilters or subType changes. 
+  // Dragging columns or toggling local checkboxes will NOT trigger this network request.
+  const { rows, rowsLoading } = useFetchOrdersGridRows(currentSubType, committedFilters);
+
+  const table = useMaterialReactTable({
+    columns: myColumns,
+    data: rows ?? [],
+    state: { 
+      isLoading: rowsLoading,
+      columnVisibility,
+      columnOrder 
+    },
+    // ...
+  });
+
+  return <MaterialReactTable table={table} />;
+}
+________________________________________
+Why this Architecture Wins on Performance & Maintenance
+1.	Separation of Concerns: <ViewSelector /> is 100% presentation-driven. You can take this component and place it on a "Users" page, an "Inventory" page, or a "Settings" page without rewriting a single line of internal code.
+2.	Network Request Minimization: Because the table fetching hook sits below or listens exclusively to committedFilters, users can click around inside the filter dropdown options endlessly without triggering premature backend database requests.
+3.	Streamlined Skeletal States: Because your lookup metadata states (isLoading) are held at the top level, you can cleanly show a single unified loading skeleton on initial page load, transitioning cleanly to micro-spinners inside the table once the layout has initialized.
+To bring this senior-architected system to life, we will build out the custom hooks layer. By cleanly abstracting our asynchronous workflows into dedicated custom hooks, we keep our React Context components completely unburdened by fetch-and-catch blocks.
+Here is the production-ready code for the three custom data hooks running our architecture:
+1.	useFetchPageViews (Fetches saved view snapshots)
+2.	useFetchOrdersLookups (Fetches dropdown selector options)
+3.	useFetchOrdersGridRows (Fetches the actual table row items)
+________________________________________
+1. useFetchPageViews.ts (Row 1 Views Engine)
+This hook fetches all saved configurations matching the parent dashboard asset key. It returns utilities to optimism-update local arrays immediately upon executing CRUD mutations.
+TypeScript
+// features/orders/hooks/useFetchPageViews.ts
+import { useState, useEffect } from 'react';
+import { SavedView } from '@/types/view';
+
+export function useFetchPageViews(screenName: string) {
+  const [allViews, setAllViews] = useState<SavedView<any>[]>([]);
+  const [viewsLoading, setViewsLoading] = useState<boolean>(true);
+  const [viewsError, setViewsError] = useState<Error | null>(null);
+
+  useEffect(() => {
+    let isMounted = true;
+    
+    async function loadViews() {
+      setViewsLoading(true);
+      try {
+        // In production, substitute with your network client instance:
+        // const response = await api.get(`/api/v1/views?screenName=${screenName}`);
+        // const data = response.data;
+        
+        // Mocking API Network database latency simulation:
+        await new Promise((resolve) => setTimeout(resolve, 600));
+        
+        const mockData: SavedView<any>[] = [
+          {
+            id: 'v1',
+            name: 'Default Pipeline View',
+            screenName: 'ORDERS_PAGE',
+            subType: 'B2B_ORDERS',
+            isSystemDefault: true,
+            filters: { status: ['pending'], minAmount: 100 },
+            columnVisibility: { id: true, trackingNumber: true, amount: true },
+            columnOrder: ['id', 'trackingNumber', 'amount']
+          },
+          {
+            id: 'v2',
+            name: 'High Value Handlers',
+            screenName: 'ORDERS_PAGE',
+            subType: 'B2B_ORDERS',
+            filters: { status: ['pending', 'shipped'], minAmount: 5000 },
+            columnVisibility: { id: true, amount: true },
+            columnOrder: ['id', 'amount']
+          }
+        ];
+
+        if (isMounted) {
+          setAllViews(mockData);
+          setViewsError(null);
+        }
+      } catch (err) {
+        if (isMounted) setViewsError(err as Error);
+      } finally {
+        if (isMounted) setViewsLoading(false);
+      }
+    }
+
+    loadViews();
+
+    return () => {
+      isMounted = false;
+    };
+  }, [screenName]);
+
+  return { allViews, setAllViews, viewsLoading, viewsError };
+}
+________________________________________
+2. useFetchOrdersLookups.ts (Row 2 Filter Options Engine)
+This handles lookup lookups so that filter checkboxes are never hardcoded. This data updates if a structural sub-type requires different selector definitions.
+TypeScript
+// features/orders/hooks/useFetchOrdersLookups.ts
+import { useState, useEffect } from 'react';
+
+export interface FilterLookups {
+  statuses: { value: string; label: string }[];
+  regions: { value: string; label: string }[];
+}
+
+export function useFetchOrdersLookups(subType: string) {
+  const [lookups, setLookups] = useState<FilterLookups>({ statuses: [], regions: [] });
+  const [lookupsLoading, setLookupsLoading] = useState<boolean>(true);
+
+  useEffect(() => {
+    async function loadMetadata() {
+      setLookupsLoading(true);
+      try {
+        // Simulated network request fetching structural criteria
+        await new Promise((resolve) => setTimeout(resolve, 400));
+
+        // Dynamically alter option criteria mappings based on layout variations
+        if (subType === 'B2B_ORDERS') {
+          setLookups({
+            statuses: [
+              { value: 'pending', label: 'Pending Processing' },
+              { value: 'shipped', label: 'In Transit' },
+              { value: 'cancelled', label: 'Voided Contract' }
+            ],
+            regions: [
+              { value: 'na', label: 'North America Corporate' },
+              { value: 'emea', label: 'EMEA Industrial' }
+            ]
+          });
+        } else {
+          setLookups({
+            statuses: [
+              { value: 'pending', label: 'Standard Pending' },
+              { value: 'shipped', label: 'Dispatched Out' }
+            ],
+            regions: [{ value: 'global', label: 'Direct to Consumer' }]
+          });
+        }
+      } catch (err) {
+        console.error('Failed to resolve lookups structural parameters', err);
+      } finally {
+        setLookupsLoading(false);
+      }
+    }
+
+    loadMetadata();
+  }, [subType]);
+
+  return { 
+    statuses: lookups.statuses, 
+    regions: lookups.regions, 
+    lookupsLoading 
+  };
+}
+________________________________________
+3. useFetchOrdersGridRows.ts (Row 3 Table Data Engine)
+This hook is decoupled from the initial page setup. It watches only committedFilters (and subType), remaining completely unbothered by column drags, row clicks, or un-applied changes inside the filter drop-downs.
+TypeScript
+// features/orders/hooks/useFetchOrdersGridRows.ts
+import { useState, useEffect } from 'react';
+import { OrderFilters } from '../context/OrdersDashboardContext';
+
+export interface OrderRowItem {
+  id: string;
+  trackingNumber: string;
+  amount: number;
+  status: string;
+}
+
+export function useFetchOrdersGridRows(subType: string, committedFilters: OrderFilters) {
+  const [rows, setRows] = useState<OrderRowItem[]>([]);
+  const [rowsLoading, setRowsLoading] = useState<boolean>(false);
+
+  useEffect(() => {
+    let isMounted = true;
+
+    async function fetchGridDataset() {
+      setRowsLoading(true);
+      try {
+        // Constructing request parameters based explicitly on committed values
+        const queryParams = new URLSearchParams({
+          subType,
+          status: (committedFilters.status || []).join(','),
+          minAmount: String(committedFilters.minAmount || 0)
+        });
+
+        // Example execution framework target:
+        // const response = await api.get(`/api/v1/orders?${queryParams.toString()}`);
+        
+        await new Promise((resolve) => setTimeout(resolve, 800));
+
+        // Generated localized payload sets matching requested constraints
+        const mockRows: OrderRowItem[] = [
+          { id: '101', trackingNumber: 'TRK-B2B-9921', amount: 4500, status: 'pending' },
+          { id: '102', trackingNumber: 'TRK-B2B-4512', amount: 12000, status: 'shipped' },
+          { id: '103', trackingNumber: 'TRK-B2B-0081', amount: 150, status: 'pending' }
+        ].filter(item => {
+          // Local filter simulation matches query inputs
+          const statusMatch = committedFilters.status?.length ? committedFilters.status.includes(item.status as any) : true;
+          const amountMatch = item.amount >= (committedFilters.minAmount || 0);
+          return statusMatch && amountMatch;
+        });
+
+        if (isMounted) {
+          setRows(mockRows);
+        }
+      } catch (err) {
+        console.error('Failed to secure datagrid parameters:', err);
+      } finally {
+        if (isMounted) setRowsLoading(false);
+      }
+    }
+
+    fetchGridDataset();
+
+    return () => {
+      isMounted = false;
+    };
+    // CRITICAL PERFORMANCE GUARD: 
+    // This effect runs ONLY when committedFilters snapshot or subType transitions.
+  }, [subType, committedFilters]); 
+
+  return { rows, rowsLoading };
+}
+________________________________________
+Architectural Review: Why This Structure Works
+•	Aborts and Cleanup Racing: Both useFetchPageViews and useFetchOrdersGridRows leverage localized block scopes tracking standard isMounted state toggles. If a user spam-switches views or clicks away from the dashboard entirely, unreturned thread processes will safely close out without triggering memory leaks or unexpected React state adjustments on unmounted instances.
+•	Granular Network Control: By wrapping these into distinct hooks rather than a single monolithic useEffect in the main page component, you guarantee that loading lookups once does not forcefully invoke loading table data rows again, maintaining optimal rendering speeds across the application.
+________________________________________
+
+To successfully build this highly performant dashboard with zero reliance on heavy state libraries, we applied a combination of structural, transactional, and optimization-focused React concepts.
+Here is a breakdown of the key architectural concepts used to pull this off:
+________________________________________
+1. Separation of Container and Presentational Components ("Dumb" vs. "Smart")
+The <ViewSelector /> component is written as a Presentational Component. It knows nothing about OrderFilters, API URLs, or column shapes. It receives arrays, statuses, and generic callback handlers (onSaveCurrentView, onViewChange) entirely through props. This abstraction is what allows the exact same component to be used across different pages with completely different filter controls.
+2. Transactional State Architecture (Committed vs. Transient)
+If we bound our filter dropdown checkboxes directly to the core dashboard state, every single mouse click would force the entire page, the API hooks, and material-react-table to lag and re-render.
+To solve this, we split our data flow into a transactional model:
+•	Transient State (transientFilters): Localized strictly to the filter controls row. It acts as a draft area while the user checks or unchecks options.
+•	Committed State (committedFilters): The source of truth that the table grid and the data-fetching hooks watch. The draft state is flushed into the committed state only when the user explicitly clicks the Apply button.
+3. Derived State (Eliminating useEffect Synchronizations)
+A junior approach to managing the isDirty flag might involve writing a complex useEffect that constantly runs deep comparisons and manages a setIsDirty(true) state hook.
+Instead, we used Derived State via useMemo. Because the context has access to both the raw active view from the database and the user's live table adjustments, the isDirty variable is calculated instantly on-the-fly during render:
+TypeScript
+const isDirty = JSON.stringify(committedFilters) !== JSON.stringify(activeView.filters);
+If the user manually reverts their changes or checks the box back to its original state, isDirty instantly flips back to false, causing the Save/Revert buttons to disappear without triggering an extra state mutation cycle.
+4. Context API as a Localized Feature State Machine
+Instead of polluting global application layers (like Redux or a root-level provider) with temporary page UI details, we leverage a Localized Context. The <OrdersDashboardProvider> wraps only this specific page dashboard template. The moment the user navigates away to a completely different part of the application, this entire feature context is instantly destroyed and unmounted, cleanly wiping out all memory allocations.
+5. Referential Stability Control (useMemo and useCallback)
+Grid systems like material-react-table are highly sensitive to object reference changes. If you pass an inline array or a raw object down to the table on every render, it interprets it as new data, creating infinite re-render loops.
+•	useMemo was used inside the table component to freeze the structural definitions of the columns.
+•	useCallback (or stable context references) ensure that the column ordering and visibility functions passed to the table remain identical between renders unless explicitly changed by user interaction.
+6. Declarative Data Fetching Hooks
+By encapsulating your network logic into useFetchOrdersGridRows, we made data-fetching declarative rather than imperative. The hook declares its dependencies ([subType, committedFilters]). Instead of writing manual fetch triggers inside component buttons, the hook naturally reacts to adjustments made to the committed state context, keeping the application's side effects predictable and safe from race conditions.
+Here are the structural insights on how our component count balances performance, maintainability, and reusability.
+________________________________________
+1. Breakdown of Created Components
+In our final working code, we created 5 core components (excluding the global modals):
+1.	OrdersDashboardPage (The Parent Orchestrator)
+2.	Row1ViewManagement (View Context Shell)
+3.	ViewSelector (The Generic, Shared Dropdown UI)
+4.	Row2FilterBar (The Transient Filter Controls)
+5.	Row3DataTable (The Presentation Table Container)
+________________________________________
+2. One Monolithic Filter Component vs. Separated Components
+Combining Row 1 (Views) and Row 2 (Filter Options) into a single, massive component is a tempting shortcut, but separating them was absolutely the right move. Here is why keeping them decoupled is a superior architectural choice:
+The Problem with a Monolithic Component
+If the ViewSelector and the FilterBar were combined, you would lose the ability to share the view architecture across the app. The view selector would become bloated with layout instructions for checkboxes, date-pickers, and numeric fields unique to that specific page.
+The Benefit of Separation
+By keeping them isolated, ViewSelector stays 100% agnostic. It can be moved into a /components/shared folder and dropped onto an "Invoices" page, a "Users" page, or a "Products" page.
+Furthermore, re-render boundaries are maintained. When a user types a number into the filter fields in Row 2, only the Row2FilterBar re-renders. The ViewSelector in Row 1 remains completely untouched, saving CPU cycles.
+________________________________________
+3. Recommendations for Separating Logic Between Components
+When deciding where to place logic, use the Single Responsibility Principle (SRP) and the concept of State Co-location.
+The Rule of Thumb for State placement
+•	Transient UI State belongs in the Leaf Component: If a piece of state is only used to control a dropdown opening/closing, a modal displaying, or an uncommitted checkbox toggle, keep it using useState inside that exact component.
+•	Committed State belongs in the Page Context: If a piece of state needs to be read by the API to fetch rows, or determines if a global "Save" button is active, lift it up into the local Page Context.
+Decoupling Event Handlers
+Components should never execute data logic directly. Instead, they should emit semantic actions.
+•	Bad: A dropdown button component calling an Axios instance directly.
+•	Good: A dropdown emitting an onViewChange(id) event callback prop, leaving the implementation details to the context provider.
+________________________________________
+4. When is "Less Components" Better vs. "More Components"?
+The choice between creating fewer components or dividing them into smaller ones depends on Reusability and Cognitive Load.
+When "Less Components" (A Single Unified File) is Better
+•	Premature Optimization: Do not break a small layout into 10 files if those sub-components are only 5 lines of code and will never be reused anywhere else. It forces developers to constantly jump between files just to understand a simple layout.
+•	Tight Domain Coupling: If Component B cannot exist or function without Component A, keeping them in the same file as separate functions (as we did in our sandbox) is perfectly fine. It keeps the feature localized and readable.
+When "More Components" (Deep Splitting) is Better
+•	To Prevent Unnecessary Re-renders: If a highly active piece of state (like a real-time text input search or a countdown timer) lives inside a parent, it will force everything below it to re-render. Splitting that active input out into its own component insulates the rest of the page from those state changes.
+•	To Promote Global Reusability: If a piece of UI (like a Button, a Modal framework, or our generic ViewSelector) performs a purely functional task that other screens can benefit from, extract it immediately.
+•	To Reduce High Complexity: If a single component's file surpasses 300–400 lines of code, it becomes difficult to maintain. Break it down logically by rows or sections so that the code remains scannable.
+
+
+Moving our useState and useEffect blocks out of the components and tucking them neatly into custom hooks (like useFetchPageViews or useFetchOrdersGridRows) is a deliberate architectural pattern called Separation of Concerns.
+If we had written all those useEffect and data-fetching fetch blocks directly inside our components, the file would quickly become a tangled, unreadable mess.
+Here is the exact engineering breakdown of why custom hooks are vastly superior to dropping raw useState and useEffect blocks into your layout code.
+________________________________________
+1. Drastically Lowering Component Cognitive Load
+A React component has one primary job: to declare what the UI should look like based on data. When you mix UI code with data-orchestration side effects, developers have to parse through lines of state setups and asynchronous try/catch blocks just to figure out where a <div> ends.
+By extracting the logic, our components remain highly readable presentation maps:
+TypeScript
+// This is pure, readable intent. No tracking variables or error parsing blocks in sight.
+function Row3DataTable() {
+  const { currentSubType, committedFilters } = useDashboard();
+  const { rows, rowsLoading } = useFetchOrdersGridRows(currentSubType, committedFilters);
+
+  return <MaterialReactTable data={rows} state={{ isLoading: rowsLoading }} ... />;
+}
+________________________________________
+2. Eliminating the Dreaded useEffect Race Conditions
+Managing raw asynchronous networks inside standard component useEffect wrappers is notorious for introducing bugs called race conditions.
+Imagine a user rapidly clicking between View A and View B. If the network request for View A takes 2 seconds, but View B takes 0.5 seconds, the user will see View B's data briefly pop up, only to be overwritten a moment later when View A's slow request finally resolves.
+When we bundle this into a custom hook, we can elegantly isolate clean-up subscriptions out of sight:
+TypeScript
+// Inside our custom hook—clean-up logic is safely managed away from the layout
+useEffect(() => {
+  let isMounted = true;
+
+  async function fetchDataset() {
+    const data = await apiCall();
+    if (isMounted) setRows(data); // If the user clicked away, this is safely ignored!
+  }
+
+  fetchDataset();
+  return () => { isMounted = false; }; // Cancels the state update if dependencies change
+}, [committedFilters]);
+________________________________________
+3. Creating Rigid "Re-render Guards"
+React components re-render whenever their internal states or parent states tick. If you place a useEffect inside a massive layout component, any accidental state change in a neighbor element could prematurely trigger your side effects.
+By moving data fetching into its own custom hook with an explicit dependency array ([subType, committedFilters]), we create a strict execution boundary. We guarantee to React that nothing happening on the rest of the page—whether a user is reordering a table column, opening a popup modal, or typing in a field—can force a backend API hit until those specific committed filters change.
+________________________________________
+4. Testability and Portability
+Testing raw useEffect blocks inside a UI component requires rendering the entire virtual DOM tree, mocking the table wrappers, and simulating user events just to see if an API call gets fired correctly.
+When logic lives inside a standalone custom hook, you can test your page's data lifecycle independently of the UI layout using standard utilities like @testing-library/react-hooks:
+TypeScript
+// Your unit test can verify data states without ever rendering a single HTML element
+const { result, waitForNextUpdate } = renderHook(() => useFetchPageViews('ORDERS_PAGE'));
+await waitForNextUpdate();
+expect(result.current.allViews).toHaveLength(2);
+________________________________________
+Summary Checklist: When to write a Custom Hook
+•	Use useState / useEffect inside the component: When the state is purely graphical and superficial (e.g., is a dropdown menu open? Is a text field currently focused?).
+•	Extract into a Custom Hook: When the state coordinates synchronous data mutations, talks to a network API database, or orchestrates side effects that rely on business data.
+
+
+To truly understand why useEffect race conditions are so dreaded, we have to look at the asynchronous nature of the web.
+When you trigger a data fetch inside a standard React component, you are launching an asynchronous operation into the background. React has absolutely no built-in awareness of network speeds. It doesn't know—or care—which network request was fired first; it only cares about which network response arrives last.
+Here is a deep dive into how race conditions happen, why they break applications, and how custom hooks elegantly eliminate them.
+________________________________________
+1. The Anatomy of a Race Condition Bug
+Imagine a user is clicking through a sidebar to view different project dashboards.
+1.	The user clicks on Project A. A network request (Request #1) is fired to fetch Project A's data.
+2.	The network bottlenecks or the database takes a moment to process Request #1.
+3.	Impatiently, the user clicks on Project B. React changes the state, re-renders, and fires a brand-new network request (Request #2) to fetch Project B's data.
+4.	Request #2 resolves incredibly fast (perhaps it was cached or the dataset is tiny). The component updates, and the UI correctly displays Project B's data.
+5.	Suddenly, 500ms later, the slow Request #1 for Project A finally finishes. Because the component's internal state setter (setData) is still blindly waiting for that promise to resolve, it fires.
+The Result: The UI text header says "Project B", but the data table underneath suddenly flickers and displays Project A's data. The application is now in a broken, corrupted state.
+________________________________________
+2. Visualizing the Race Condition Timeline
+As shown in the timeline below, the linear order of responses overwrites the chronological order of intent:
+User Click:      [Click Project A] ────────────────────► [Click Project B]
+                        │                                      │
+Network Flight:         ▼ (Request #1: Slow)                   ▼ (Request #2: Fast)
+                        ███████████████████████████████████▓   █████████▓
+                                                           │            │
+API Resolves:                                              │            ▼
+                                                           │     [UI Shows Project B]
+                                                           ▼     (Correct)
+                                                    [UI Shows Project A] 
+                                                    (CORRUPTED OVERWRITE!)
+________________________________________
+3. How Custom Hooks Kill Race Conditions
+To eliminate this bug, we must ensure that when a component's dependencies change (or when the component unmounts), any older, uncompleted network requests are stripped of their permission to update the React state.
+We accomplish this using two main patterns inside our custom hooks: The Boolean Flag Pattern or The AbortController API.
+Pattern A: The Boolean Flag Pattern (Clean & Fail-Safe)
+This is the lightweight approach we used in our sandbox hooks. It leverages the cleanup function of React's useEffect.
+TypeScript
+export function useFetchOrdersGridRows(subType: string, committedFilters: OrderFilters) {
+  const [rows, setRows] = useState<OrderRowItem[]>([]);
+
+  useEffect(() => {
+    // 1. Initialize a local block-scoped flag set to true
+    let isCurrent = true;
+
+    async function fetchDataset() {
+      const data = await api.get('/orders', { subType, ...committedFilters });
+      
+      // 3. Only update state if this specific effect cycle is still the active one!
+      if (isCurrent) {
+        setRows(data);
+      }
+    }
+
+    fetchDataset();
+
+    // 2. THE CLEANUP: React runs this the EXACT millisecond the dependencies change
+    return () => {
+      isCurrent = false; // Permanently cancels this specific fetch's permission to update state
+    };
+  }, [subType, committedFilters]);
+
+  return { rows };
+}
+How it works: When the user switches from Project A to Project B, React immediately triggers the cleanup function of Project A's effect, instantly flipping its local isCurrent flag to false. When Project A's slow network request eventually returns, the condition if (isCurrent) fails, and the stale data is safely dropped into the void.
+Pattern B: The AbortController API (The Gold Standard)
+While the boolean flag prevents stale state updates, the browser is still technically forced to download the entire useless payload in the background. If you want to be highly optimized, you can use the browser's native AbortController to physically cancel the network request over the wire.
+TypeScript
+export function useFetchOrdersGridRows(subType: string, committedFilters: OrderFilters) {
+  const [rows, setRows] = useState<OrderRowItem[]>([]);
+
+  useEffect(() => {
+    // 1. Create an instance of the browser's controller
+    const controller = new AbortController();
+    const { signal } = controller;
+
+    async function fetchDataset() {
+      try {
+        // 2. Pass the abort signal down to your fetch/axios client
+        const response = await fetch(`/api/orders?subType=${subType}`, { signal });
+        const data = await response.json();
+        
+        setRows(data);
+      } catch (error: any) {
+        if (error.name === 'AbortError') {
+          console.log('Fetch successfully aborted by the hook guard.');
+        } else {
+          // Handle legitimate errors
+        }
+      }
+    }
+
+    fetchDataset();
+
+    // 3. THE CLEANUP: Abort the actual network request instantly if dependencies shift
+    return () => {
+      controller.abort();
+    };
+  }, [subType, committedFilters]);
+
+  return { rows };
+}
+How it works: The millisecond the user changes a filter or swaps tabs, the browser immediately severs the HTTP connection for the pending request. You save user bandwidth, reduce server strain, and guarantee that the UI stays perfectly synchronized with the user's latest intent.
+
+Yes, absolutely! Custom hooks follow a very specific lifecycle because they are bound directly to the lifecycle of the React component that calls them.
+A common misconception is that custom hooks have a separate lifecycle from the component. In reality, a custom hook is not an isolated container; it is a macro that injects state and effects directly into the host component. If a component re-renders, the custom hook code executes again from top to bottom.
+To understand exactly when your code runs, let's trace the execution timeline of our useFetchOrdersGridRows hook through a complete lifecycle: Mounting, Updating (The Re-render Guard), and Unmounting.
+________________________________________
+The Complete Hook Lifecycle Timeline
+Here is step-by-step what happens under the hood when your page runs:
+1. The Mount Phase (Initial Load)
+When the user navigates to your dashboard, the host component mounts.
+•	Line-by-Line Execution: React executes the hook function from the top. It initializes the useState slots (rows as an empty array, rowsLoading as false).
+•	The Return: The hook immediately returns those initial values so the component can draw its initial setup (e.g., showing a table layout with a loading spinner).
+•	The Side Effect: After the browser paints that initial setup, React looks at the useEffect block. Because it is the initial mount, the effect fires. It sets rowsLoading to true and triggers the asynchronous API network fetch in the background.
+•	The Resolution: Once the API network request resolves 600ms later, the hook calls setRows(mockData). This state change forces the host component to re-render with the fresh data rows.
+________________________________________
+2. The Update Phase (The Re-render Guard)
+This is where the magic of the dependency array [subType, committedFilters] comes into play.
+Suppose a user is actively interacting with the dashboard. They check a box in the filter dropdown (Row 2) or drag a table column to resize it (Row 3).
+•	The Re-render Trigger: These UI actions cause states to shift, forcing the component—and the custom hook code—to re-execute from top to bottom.
+•	The Skip Condition: When the hook executes this time, React evaluates the values in the useEffect dependency array. If subType and committedFilters are exactly the same as they were on the last render, React completely skips the useEffect block.
+•	The Performance Win: The internal API network fetch is not called again. The hook simply returns the already-cached rows array instantly. Typing, dragging, or checking un-applied boxes runs at a smooth 60% frames-per-second, perfectly insulated from network lags.
+________________________________________
+3. The Transaction Phase (Applying Filters)
+Now, the user hits the Apply Filters button.
+•	The Commit: The context transforms transientFilters into committedFilters.
+•	The Effect Cleanup: Because a value in the dependency array changed, React prepares to rerun the effect. But first, it executes the cleanup function from the previous fetch execution cycle (return () => { isMounted = false }). This cancels any old, lingering requests.
+•	The Fetch Rerun: React fires the useEffect block again with the brand-new filter parameters, pulling the fresh target rows from your backend.
+________________________________________
+4. The Unmount Phase (Leaving the Page)
+When the user clicks a link to visit a completely different page (e.g., the Settings page), the dashboard component unmounts.
+•	The Final Cleanup: The custom hook is destroyed along with the component. React runs the useEffect cleanup function one final time.
+•	The Safe Drop: If a network request was still flying through cyberspace when the user left, isMounted flips to false. When the request eventually arrives, it safely hits the floor without trying to update a non-existent component, preventing memory leaks and application crashes.
+________________________________________
+Architectural Rule of Thumb
+Event	What the Hook Does	What the Component Does
+Component Mounts	Initializes local state; fires API effect.	Renders layout skeletons.
+User types / drags columns	Executes top-to-bottom but skips the API effect.	Renders instant visual updates.
+User clicks "Apply Filters"	Cleans up the old fetch; fires a fresh API fetch.	Displays a loading spinner over rows.
+Component Unmounts	Runs final effect cleanup; destroys states.	Disappears from the screen entirely.
+
+
+
+To deliver a premium user experience (UX) for a data-dense engineering application, the user interface (UI) needs to move away from the basic, blocky forms of standard templates and adopt an intentional workspace layout.
+When dealing with saved views, complex filters, and large data tables, a user’s biggest complaints are typically visual noise, layout shifts, and accidental loss of changes.
+Here is an optimized UX design strategy for your layout, designed to maximize data readability, minimize friction, and give users total control over their workspaces.
+________________________________________
+1. Visual Layout Wireframe Hierarchy
+An enterprise control page should read predictably from top to bottom, keeping global contexts high and operational controls localized.
+ 
+________________________________________
+2. Row-by-Row UX Enhancements
+Row 1: The Context & Workspace Header
+•	The Sub-Type Selector: Do not hide the page sub-types (e.g., B2B vs B2C) inside a deep dropdown. Treat them as a Segmented Control Slidertab or a distinct Button Group on the far right. Switching sub-types completely swaps out the underlying grid rules, so it needs to feel like changing independent channels.
+•	The View Selector Dropdown:
+o	Give it a distinct visual weight. If it contains unsaved modifications, change the background to a subtle amber tint and append a dot marker (• View Name (Modified)).
+o	Crucial UX Guard: Place the Save Changes and Revert buttons immediately next to the dropdown, flashing them into view with a smooth CSS opacity transition only when isDirty becomes true. This gives clear feedback that the current configuration is in a draft state.
+Row 2: The Filter Strip (Inline, Non-Invasive)
+•	Avoid the "Collapsible Accordion" Box: Traditional dashboards hide filters inside a heavy drawer or a massive expanding panel that forces the whole table down when opened, causing a frustrating visual jump.
+•	Use an Inline Badged Filter Strip: Keep filters resting directly above the table as a sleek row of borderless drop-menus.
+•	Visual Pill Indicators: When an option is selected within a dropdown, transform the filter label into a distinct capsule shape containing a clear dismissal option (e.g., [ Stage: Pending ✕ ]). This allows users to check their current filter criteria instantly at a single glance without clicking into anything.
+•	The Action Station Area: Group the "Reset" and "Apply" buttons together on the far right of the strip. Keep the "Apply" button styled with your brand's dominant accent color to provide a clear, intuitive endpoint for user interaction.
+Row 3: The Data Grid (Maximum Readability)
+•	Density Controls: When displaying critical data metrics, some operators prefer a dense spreadsheet view while others prefer roomier, modern rows. Ensure the material-react-table toolbar exposes native density-toggling icons.
+•	Frozen Table Header Rows: Pin the table header row directly to the top of the data panel grid block. As users scroll down thousands of data entries, the column labels must remain locked in place so they never lose track of what columns they are evaluating.
+•	Micro-Status Visual Tags: Never rely on plain text raw strings to display operational lifecycles like "shipped", "pending", or "cancelled". Wrap them inside rounded status pills featuring high-contrast backgrounds and matching left-aligned colored dot indicators (• Pending).
+________________________________________
+3. High-Fidelity Tailwind CSS Theme Variables
+To match these design requirements in your local environment, update the markup elements of your sandbox code to incorporate these modern UI elements:
+System Layer	CSS Implementation / Tailwind Values	UX Impact
+Workspace Canvas	bg-slate-50 min-h-screen text-slate-900	Eliminates glare; provides a clean, neutral background for long work sessions.
+Workspace Paneling	bg-white border border-slate-200/80 rounded-xl shadow-sm	Creates a distinct structural card layout without visual bulk.
+Unsaved Action Pills	bg-amber-500/10 text-amber-700 ring-1 ring-amber-600/20	Attracts user attention to unsaved modifications without screaming in bright red warning flags.
+The Primary Button	bg-indigo-600 hover:bg-indigo-700 text-white shadow-sm transition-all duration-200 font-semibold rounded-lg	Provides an intuitive, clean interface target driving interaction forward.
+________________________________________
+4. Crucial UX Micro-Interactions (The Polish)
+1.	Skeleton State Screen Loaders: Instead of using a blank white block or a center-aligned spinning loading wheel that freezes the UI during network calls, apply a pulsing grid skeleton (animate-pulse). This communicates structure and reduces perceived wait times.
+2.	Optimistic View Switching: When a user chooses an entirely separate saved layout snapshot, do not flash the page black. Immediately switch the visibility flags and layout boundaries instantly while letting the table rows show a localized loading overlay over the old data grid while the new fetch finishes.
+3.	Preventing Lost Layout Formats: If a user modifies column order or updates active toggle checkboxes, and then accidentally tries to switch to another view or change sub-types without saving, display an elegant confirmation modal alerting them that their local layout adjustments will be lost.
+
+
+
+________________________________________
+
+
+
+
+COMPLETE EXAMPLE
+
+________________________________________
+import React, { createContext, useContext, useState, useMemo, useEffect } from 'react';
+import { useMaterialReactTable, MaterialReactTable, type MRT_ColumnDef } from 'material-react-table';
+
+// ============================================================================
+// 1. GLOBAL TYPE DEFINITIONS & CONTRACTS
+// ============================================================================
+
+/**
+ * Database structural record for a dashboard view configuration snapshot.
+ * @template TFilters The dynamic filter layout matching its host dashboard page.
+ */
+interface SavedView<TFilters = Record<string, any>> {
+  id: string;
+  name: string;
+  screenName: string;
+  subType?: string;
+  isSystemDefault?: boolean;
+  filters: TFilters;
+  columnVisibility: Record<string, boolean>;
+  columnOrder: string[];
+}
+
+/**
+ * Structural footprint representing this specific sandbox page's filter fields.
+ */
+interface OrderFilters {
+  status: ('pending' | 'shipped' | 'cancelled')[];
+  minAmount: number;
+}
+
+/**
+ * Structural footprint for the lookup options rendered inside filter dropdown wrappers.
+ */
+interface FilterLookups {
+  statuses: { value: string; label: string }[];
+}
+
+/**
+ * Data shape representing individual row records displayed inside the grid.
+ */
+interface OrderRowItem {
+  id: string;
+  trackingNumber: string;
+  amount: number;
+  status: string;
+}
+
+/**
+ * Master interface managing structural state distribution across rows 1, 2, and 3.
+ */
+interface DashboardContextState<F> {
+  views: SavedView<F>[];
+  activeViewId: string | null;
+  isDirty: boolean;
+  currentSubType: string;
+  changeSubType: (newSubType: string) => void;
+  committedFilters: F;
+  columnVisibility: Record<string, boolean>;
+  columnOrder: string[];
+  isLoading: boolean;
+  transientFilters: F;
+  setTransientFilters: React.Dispatch<React.SetStateAction<F>>;
+  dropdownOptions: FilterLookups;
+  
+  // Interaction Methods
+  changeView: (viewId: string) => void;
+  applyTransientFilters: () => void;
+  resetTransientFilters: () => void;
+  saveCurrentView: () => Promise<void>;
+  revertToSaved: () => void;
+  createNewView: (name: string) => Promise<void>;
+  deleteView: (id: string) => Promise<void>;
+  setColumnVisibility: React.Dispatch<React.SetStateAction<Record<string, boolean>>>;
+  setColumnOrder: React.Dispatch<React.SetStateAction<string[]>>;
+}
+
+// Factory initial values applied to reset workflows
+const factoryInitialFilters: OrderFilters = {
+  status: [],
+  minAmount: 0,
+};
+
+// ============================================================================
+// 2. MOCKED ASYNCHRONOUS DATA-FETCHING HOOKS
+// ============================================================================
+
+/**
+ * Hook 1: Fetches saved configurations matching the page screen configuration.
+ */
+function useFetchPageViews(screenName: string) {
+  const [allViews, setAllViews] = useState<SavedView<OrderFilters>[]>([]);
+  const [viewsLoading, setViewsLoading] = useState(true);
+
+  useEffect(() => {
+    async function loadViews() {
+      await new Promise((resolve) => setTimeout(resolve, 500)); // Latency Simulation
+      setAllViews([
+        {
+          id: 'v1',
+          name: 'Standard Pipeline',
+          screenName: 'ORDERS_PAGE',
+          subType: 'B2B_ORDERS',
+          isSystemDefault: true,
+          filters: { status: ['pending'], minAmount: 500 },
+          columnVisibility: { id: true, trackingNumber: true, amount: true, status: true },
+          columnOrder: ['id', 'trackingNumber', 'amount', 'status']
+        },
+        {
+          id: 'v2',
+          name: 'High-Value Executions',
+          screenName: 'ORDERS_PAGE',
+          subType: 'B2B_ORDERS',
+          filters: { status: ['pending', 'shipped'], minAmount: 5000 },
+          columnVisibility: { id: true, amount: true, status: true },
+          columnOrder: ['id', 'amount', 'status']
+        }
+      ]);
+      setViewsLoading(false);
+    }
+    loadViews();
+  }, [screenName]);
+
+  return { allViews, setAllViews, viewsLoading };
+}
+
+/**
+ * Hook 2: Fetches static metadata options displayed inside structural filter inputs.
+ */
+function useFetchOrdersLookups(subType: string) {
+  const [lookups, setLookups] = useState<FilterLookups>({ statuses: [] });
+  const [lookupsLoading, setLookupsLoading] = useState(true);
+
+  useEffect(() => {
+    async function loadMetadata() {
+      setLookupsLoading(true);
+      await new Promise((resolve) => setTimeout(resolve, 300));
+      setLookups({
+        statuses: [
+          { value: 'pending', label: 'Pending Processing' },
+          { value: 'shipped', label: 'In Transit' },
+          { value: 'cancelled', label: 'Voided Contract' }
+        ]
+      });
+      setLookupsLoading(false);
+    }
+    loadMetadata();
+  }, [subType]);
+
+  return { lookups, lookupsLoading };
+}
+
+/**
+ * Hook 3: Handles dynamic table rows query parameters. Reactive ONLY to committed actions.
+ */
+function useFetchOrdersGridRows(subType: string, committedFilters: OrderFilters) {
+  const [rows, setRows] = useState<OrderRowItem[]>([]);
+  const [rowsLoading, setRowsLoading] = useState(false);
+
+  useEffect(() => {
+    async function fetchDataset() {
+      setRowsLoading(true);
+      await new Promise((resolve) => setTimeout(resolve, 600)); // Network simulation
+      
+      const staticMockDatabase: OrderRowItem[] = [
+        { id: '101', trackingNumber: 'TRK-B2B-9901', amount: 4500, status: 'pending' },
+        { id: '102', trackingNumber: 'TRK-B2B-4512', amount: 12500, status: 'shipped' },
+        { id: '103', trackingNumber: 'TRK-B2B-0081', amount: 150, status: 'pending' },
+        { id: '104', trackingNumber: 'TRK-B2B-7721', amount: 6200, status: 'cancelled' }
+      ];
+
+      // Simulated backend calculation filter engine
+      const filteredResults = staticMockDatabase.filter(item => {
+        const statusMatch = committedFilters.status.length ? committedFilters.status.includes(item.status as any) : true;
+        const amountMatch = item.amount >= committedFilters.minAmount;
+        return statusMatch && amountMatch;
+      });
+
+      setRows(filteredResults);
+      setRowsLoading(false);
+    }
+    fetchDataset();
+  }, [subType, committedFilters]);
+
+  return { rows, rowsLoading };
+}
+
+// ============================================================================
+// 3. ENCAPSULATED CONTEXT PROVIDER (THE BRAIN)
+// ============================================================================
+
+const DashboardContext = createContext<DashboardContextState<OrderFilters> | undefined>(undefined);
+
+export const OrdersDashboardProvider: React.FC<{ children: React.ReactNode }> = ({ children }) => {
+  const [currentSubType, setCurrentSubType] = useState('B2B_ORDERS');
+  
+  // Invoke data fetching hooks
+  const { allViews, setAllViews, viewsLoading } = useFetchPageViews('ORDERS_PAGE');
+  const { lookups, lookupsLoading } = useFetchOrdersLookups(currentSubType);
+
+  // Layout presentation configurations state trackers
+  const [activeViewId, setActiveViewId] = useState<string | null>('v1');
+  const [columnVisibility, setColumnVisibility] = useState<Record<string, boolean>>({});
+  const [columnOrder, setColumnOrder] = useState<string[]>([]);
+  const [committedFilters, setCommittedFilters] = useState<OrderFilters>(factoryInitialFilters);
+  const [transientFilters, setTransientFilters] = useState<OrderFilters>(factoryInitialFilters);
+
+  // Isolate current subType's valid system configs
+  const views = useMemo(() => {
+    return allViews.filter(v => v.screenName === 'ORDERS_PAGE' && v.subType === currentSubType);
+  }, [allViews, currentSubType]);
+
+  const activeView = useMemo(() => views.find(v => v.id === activeViewId), [views, activeViewId]);
+
+  // Sync state layout defaults whenever a valid default view returns on initial mount
+  useEffect(() => {
+    if (activeView && Object.keys(columnVisibility).length === 0) {
+      setCommittedFilters(activeView.filters);
+      setTransientFilters(activeView.filters);
+      setColumnVisibility(activeView.columnVisibility);
+      setColumnOrder(activeView.columnOrder);
+    }
+  }, [activeView]);
+
+  /**
+   * Evaluates deep-equality to monitor if the working playground parameters match the pristine saved view
+   */
+  const isDirty = useMemo(() => {
+    if (!activeView) return false;
+    return (
+      JSON.stringify(committedFilters) !== JSON.stringify(activeView.filters) ||
+      JSON.stringify(columnVisibility) !== JSON.stringify(activeView.columnVisibility) ||
+      JSON.stringify(columnOrder) !== JSON.stringify(activeView.columnOrder)
+    );
+  }, [committedFilters, columnVisibility, columnOrder, activeView]);
+
+  // MANAGEMENT LAYER LOGIC METHODS
+  const changeView = (viewId: string) => {
+    const target = views.find(v => v.id === viewId);
+    if (target) {
+      setActiveViewId(viewId);
+      setCommittedFilters(target.filters);
+      setTransientFilters(target.filters);
+      setColumnVisibility(target.columnVisibility);
+      setColumnOrder(target.columnOrder);
+    }
+  };
+
+  const changeSubType = (newSubType: string) => {
+    setCurrentSubType(newSubType);
+    setActiveViewId(null);
+    setCommittedFilters(factoryInitialFilters);
+    setTransientFilters(factoryInitialFilters);
+    setColumnVisibility({});
+    setColumnOrder([]);
+  };
+
+  const applyTransientFilters = () => setCommittedFilters(transientFilters);
+  const resetTransientFilters = () => {
+    setTransientFilters(factoryInitialFilters);
+    setCommittedFilters(factoryInitialFilters);
+  };
+
+  const revertToSaved = () => {
+    if (activeView) {
+      setCommittedFilters(activeView.filters);
+      setTransientFilters(activeView.filters);
+      setColumnVisibility(activeView.columnVisibility);
+      setColumnOrder(activeView.columnOrder);
+    }
+  };
+
+  const saveCurrentView = async () => {
+    if (!activeViewId) return;
+    setAllViews(prev => prev.map(v => v.id === activeViewId 
+      ? { ...v, filters: committedFilters, columnVisibility, columnOrder } : v
+    ));
+  };
+
+  const createNewView = async (name: string) => {
+    const nextId = `custom-${Date.now()}`;
+    const newRecord: SavedView<OrderFilters> = {
+      id: nextId,
+      name,
+      screenName: 'ORDERS_PAGE',
+      subType: currentSubType,
+      filters: committedFilters,
+      columnVisibility,
+      columnOrder
+    };
+    setAllViews(prev => [...prev, newRecord]);
+    setActiveViewId(nextId);
+  };
+
+  const deleteView = async (id: string) => {
+    setAllViews(prev => prev.filter(v => v.id !== id));
+    if (activeViewId === id) {
+      setActiveViewId(null);
+      resetTransientFilters();
+    }
+  };
+
+  const isLoading = viewsLoading || lookupsLoading;
+
+  return (
+    <DashboardContext.Provider value={{
+      views, activeViewId, isDirty, currentSubType, changeSubType, committedFilters,
+      columnVisibility, columnOrder, isLoading, transientFilters, setTransientFilters,
+      dropdownOptions: lookups, changeView, applyTransientFilters, resetTransientFilters,
+      saveCurrentView, revertToSaved, createNewView, deleteView, setColumnVisibility, setColumnOrder
+    }}>
+      {children}
+    </DashboardContext.Provider>
+  );
+};
+
+const useDashboard = () => {
+  const context = useContext(DashboardContext);
+  if (!context) throw new Error('Context boundaries error');
+  return context;
+};
+
+// ============================================================================
+// 4. GENERIC REUSABLE VIEW SELECTOR COMPONENT (ROW 1 UI SHELL)
+// ============================================================================
+
+interface ViewSelectorProps<T> {
+  views: SavedView<T>[];
+  activeViewId: string | null;
+  isDirty: boolean;
+  onViewChange: (viewId: string) => void;
+  onSaveCurrentView: () => Promise<void>;
+  onRevertChanges: () => void;
+  onCreateViewSubmit: (name: string) => Promise<void>;
+  onDeleteViewSubmit: (id: string) => Promise<void>;
+}
+
+function ViewSelector<T>({
+  views, activeViewId, isDirty, onViewChange,
+  onSaveCurrentView, onRevertChanges, onCreateViewSubmit, onDeleteViewSubmit
+}: ViewSelectorProps<T>) {
+  const [isOpen, setIsOpen] = useState(false);
+  const activeView = views.find(v => v.id === activeViewId);
+  const label = activeView ? `${activeView.name}${isDirty ? ' * (Unsaved)' : ''}` : 'Custom Filter Config';
+
+  // Modal Input states
+  const [showCreatePrompt, setShowCreatePrompt] = useState(false);
+  const [showManagePrompt, setShowManagePrompt] = useState(false);
+  const [newViewName, setNewViewName] = useState('');
+
+  return (
+    <div className="relative inline-flex items-center gap-3">
+      <div className="relative">
+        <button
+          onClick={() => setIsOpen(!isOpen)}
+          className={`px-4 py-2 text-sm font-medium border rounded-md shadow-sm flex items-center gap-2 ${
+            isDirty ? 'bg-amber-50 border-amber-300 text-amber-800' : 'bg-white border-gray-300 text-gray-700'
+          }`}
+        >
+          <span>{label}</span>
+          <span className="text-xs">▼</span>
+        </button>
+
+        {isOpen && (
+          <>
+            <div className="fixed inset-0 z-10" onClick={() => setIsOpen(false)} />
+            <div className="absolute right-0 mt-2 w-64 bg-white border border-gray-200 rounded-md shadow-lg z-20 overflow-hidden">
+              <div className="py-1 max-h-48 overflow-y-auto">
+                {views.map(v => (
+                  <button
+                    key={v.id}
+                    onClick={() => { onViewChange(v.id); setIsOpen(false); }}
+                    className={`w-full text-left px-4 py-2 text-sm ${v.id === activeViewId ? 'bg-blue-50 text-blue-600 font-semibold' : 'text-gray-700 hover:bg-gray-100'}`}
+                  >
+                    {v.name}
+                  </button>
+                ))}
+              </div>
+              <div className="border-t border-gray-100 bg-gray-50 p-2 flex flex-col gap-1">
+                <button 
+                  onClick={() => { setShowCreatePrompt(true); setIsOpen(false); }}
+                  className="text-left text-xs text-blue-600 hover:underline px-2 py-1 font-medium"
+                >
+                  + Create New View
+                </button>
+                <button 
+                  onClick={() => { setShowManagePrompt(true); setIsOpen(false); }}
+                  className="text-left text-xs text-gray-600 hover:underline px-2 py-1 font-medium"
+                >
+                  ⚙ Manage Saved Views
+                </button>
+              </div>
+            </div>
+          </>
+        )}
+      </div>
+
+      {isDirty && (
+        <div className="flex gap-2">
+          <button onClick={onSaveCurrentView} className="px-3 py-1.5 bg-emerald-600 text-white rounded text-xs font-semibold hover:bg-emerald-700 transition">
+            Save Changes
+          </button>
+          <button onClick={onRevertChanges} className="px-3 py-1.5 bg-white border border-gray-300 text-gray-700 rounded text-xs font-semibold hover:bg-gray-50 transition">
+            Revert
+          </button>
+        </div>
+      )}
+
+      {/* MODAL 1: CREATE DIALOG BOX */}
+      {showCreatePrompt && (
+        <div className="fixed inset-0 bg-black/40 flex items-center justify-center z-50">
+          <div className="bg-white p-6 rounded-lg shadow-xl w-80">
+            <h3 className="font-bold text-sm mb-3 text-gray-800">Create New Layout Snapshot</h3>
+            <input 
+              type="text" placeholder="View Name" value={newViewName} 
+              onChange={(e) => setNewViewName(e.target.value)}
+              className="w-full border rounded p-2 text-sm mb-4 outline-none border-gray-300 focus:border-blue-500"
+            />
+            <div className="flex justify-end gap-2">
+              <button onClick={() => setShowCreatePrompt(false)} className="px-3 py-1.5 text-xs font-semibold text-gray-600">Cancel</button>
+              <button 
+                onClick={() => { if(newViewName.trim()) { onCreateViewSubmit(newViewName); setShowCreatePrompt(false); setNewViewName(''); } }}
+                className="px-3 py-1.5 text-xs font-semibold bg-blue-600 text-white rounded"
+              >
+                Create
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* MODAL 2: MANAGE VIEW LISTS */}
+      {showManagePrompt && (
+        <div className="fixed inset-0 bg-black/40 flex items-center justify-center z-50">
+          <div className="bg-white p-6 rounded-lg shadow-xl w-80">
+            <h3 className="font-bold text-sm mb-3 text-gray-800">Manage Views</h3>
+            <div className="flex flex-col gap-2 max-h-40 overflow-y-auto mb-4">
+              {views.map(v => (
+                <div key={v.id} className="flex justify-between items-center text-sm p-1.5 border-b">
+                  <span className="truncate max-w-[180px]">{v.name}</span>
+                  {!v.isSystemDefault && (
+                    <button onClick={() => onDeleteViewSubmit(v.id)} className="text-red-500 text-xs font-semibold hover:underline">Delete</button>
+                  )}
+                </div>
+              ))}
+            </div>
+            <button onClick={() => setShowManagePrompt(false)} className="w-full py-1.5 text-xs font-semibold bg-gray-100 hover:bg-gray-200 rounded text-gray-700">Close</button>
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
+
+// ============================================================================
+// 5. INNER WORKSPACE COMPONENTS (ROW-BY-ROW PANELS)
+// ============================================================================
+
+function Row1ViewManagement() {
+  const { views, activeViewId, isDirty, changeView, saveCurrentView, revertToSaved, createNewView, deleteView } = useDashboard();
+  return (
+    <div className="flex justify-between items-center bg-white p-4 border rounded-lg shadow-sm">
+      <div>
+        <h1 className="text-lg font-bold text-gray-800">Logistics Controls Portal</h1>
+        <p className="text-xs text-gray-400 font-medium">Render operations across shared dynamic layout frameworks</p>
+      </div>
+      <ViewSelector
+        views={views} activeViewId={activeViewId} isDirty={isDirty} onViewChange={changeView}
+        onSaveCurrentView={saveCurrentView} onRevertChanges={revertToSaved} onCreateViewSubmit={createNewView} onDeleteViewSubmit={deleteView}
+      />
+    </div>
+  );
+}
+
+function Row2FilterBar() {
+  const { transientFilters, setTransientFilters, applyTransientFilters, resetTransientFilters, dropdownOptions } = useDashboard();
+
+  return (
+    <div className="bg-gray-50 border border-gray-200 rounded-lg p-4 flex flex-wrap items-center justify-between gap-4">
+      <div className="flex items-center gap-4">
+        {/* Status Handling Selection */}
+        <div className="flex flex-col gap-1">
+          <label className="text-xs font-bold text-gray-500">Order Stage Filter</label>
+          <select
+            className="border border-gray-300 rounded p-1.5 text-xs bg-white min-w-[150px]"
+            value={transientFilters.status[0] || ''}
+            onChange={(e) => {
+              const val = e.target.value;
+              setTransientFilters(prev => ({ ...prev, status: val ? [val as any] : [] }));
+            }}
+          >
+            <option value="">All Standard Stages</option>
+            {dropdownOptions.statuses.map(opt => (
+              <option key={opt.value} value={opt.value}>{opt.label}</option>
+            ))}
+          </select>
+        </div>
+
+        {/* Numeric Filtering Input */}
+        <div className="flex flex-col gap-1">
+          <label className="text-xs font-bold text-gray-500">Min Line-Value ($)</label>
+          <input
+            type="number" className="border border-gray-300 rounded p-1 text-xs w-28 h-[28px]"
+            value={transientFilters.minAmount}
+            onChange={(e) => setTransientFilters(prev => ({ ...prev, minAmount: Number(e.target.value) }))}
+          />
+        </div>
+      </div>
+
+      <div className="flex items-center gap-2">
+        <button onClick={resetTransientFilters} className="text-xs font-bold text-gray-500 hover:text-gray-800 py-2 px-3">
+          Reset
+        </button>
+        <button onClick={applyTransientFilters} className="bg-blue-600 hover:bg-blue-700 text-white text-xs font-bold py-1.5 px-4 rounded shadow-sm transition">
+          Apply Filters
+        </button>
+      </div>
+    </div>
+  );
+}
+
+function Row3DataTable() {
+  const { currentSubType, committedFilters, columnVisibility, setColumnVisibility, columnOrder, setColumnOrder } = useDashboard();
+  
+  // Dynamic network records hook
+  const { rows, rowsLoading } = useFetchOrdersGridRows(currentSubType, committedFilters);
+
+  // Material React Table Column Framework Blueprint Definitions
+  const columns = useMemo<MRT_ColumnDef<OrderRowItem>[]>(() => [
+    { accessorKey: 'id', header: 'Internal ID' },
+    { accessorKey: 'trackingNumber', header: 'Waybill Number' },
+    { accessorKey: 'amount', header: 'Evaluation Value', Cell: ({ cell }) => `$${cell.getValue<number>().toLocaleString()}` },
+    { accessorKey: 'status', header: 'Pipeline Status' },
+  ], []);
+
+  const table = useMaterialReactTable({
+    columns,
+    data: rows,
+    enableColumnOrdering: true,
+    enableColumnDragging: true,
+    state: {
+      isLoading: rowsLoading,
+      columnVisibility,
+      columnOrder,
+    },
+    onColumnVisibilityChange: setColumnVisibility,
+    onColumnOrderChange: setColumnOrder,
+    initialState: { density: 'compact' },
+  });
+
+  return (
+    <div className="border border-gray-200 rounded-lg overflow-hidden bg-white shadow-sm">
+      <MaterialReactTable table={table} />
+    </div>
+  );
+}
+
+// ============================================================================
+// 6. MASTER PAGE ENTRYPOINT COMPONENT ASSEMBLY
+// ============================================================================
+
+export default function OrdersDashboardSandbox() {
+  return (
+    <OrdersDashboardProvider>
+      <div className="p-6 max-w-6xl mx-auto flex flex-col gap-4 font-sans bg-slate-200 min-h-screen">
+        {/* Row 1 Layout Module */}
+        <Row1ViewManagement />
+        
+        {/* Row 2 Layout Module */}
+        <Row2FilterBar />
+        
+        {/* Row 3 Layout Module */}
+        <Row3DataTable />
+      </div>
+    </OrdersDashboardProvider>
+  );
+}
